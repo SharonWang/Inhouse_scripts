@@ -29,6 +29,8 @@ preprocessing pipelines. All project files are maintained under
   panel-specific coordinate limits, far-left-only y-axes, and configurable
   legend column spacing. The function now consistently returns a one-dimensional
   NumPy array of axes, including for an unsplit plot.
+- Refined the overall UMAP title position so it is horizontally centred over
+  the combined panels and vertically centred within the reserved top margin.
 
 ### Verification
 
@@ -47,6 +49,7 @@ preprocessing pipelines. All project files are maintained under
   and compact spacing.
 - `feat: add split-panel AnnData UMAP plotting` — Added split and highlight
   modes with exact multi-panel layout controls.
+- `fix: center UMAP title in top margin` — Refined the overall title placement.
 
 ## 2026-09-04
 

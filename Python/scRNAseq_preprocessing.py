@@ -547,7 +547,9 @@ def plot_anndata_group_umap(
     legend_handletextpad : float, default=0.5
         Gap between each legend marker and its label in font-size units.
     title : str, optional
-        Plot title. No title is drawn when omitted.
+        Overall plot title, horizontally centred over the combined panel area
+        and vertically centred within the reserved top margin. No title is
+        drawn when omitted.
     xlabel : str, default="UMAP1"
         Label displayed on the horizontal axis.
     ylabel : str, default="UMAP2"
@@ -876,12 +878,13 @@ def plot_anndata_group_umap(
     # Place an overall title above the centre of the combined plotting area.
     if title is not None:
         plot_center_cm = left_cm + plot_area_width_cm / 2
+        title_y_cm = bottom_cm + height_cm + top_cm * 0.55
         fig.text(
             plot_center_cm / figure_width_cm,
-            1 - (0.08 / figure_height_cm),
+            title_y_cm / figure_height_cm,
             title,
             ha="center",
-            va="top",
+            va="center",
             fontsize=title_size,
         )
 
