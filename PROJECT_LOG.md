@@ -20,6 +20,8 @@ preprocessing pipelines. All project files are maintained under
 - Extended `plot_anndata_group_umap()` with the optional `top_group` parameter.
   A selected category is validated and drawn last so it remains visually above
   all other cells without changing categorical legend order.
+- Extended `plot_anndata_group_umap()` with `legend_ncol` for configurable
+  multi-column legends and compact inter-column and marker-to-label spacing.
 
 ### Verification
 
@@ -34,6 +36,8 @@ preprocessing pipelines. All project files are maintained under
   utility and this log entry.
 - `feat: support top group in AnnData UMAP plots` — Added foreground plotting
   for a selected annotation group.
+- `feat: support multi-column UMAP legends` — Added configurable legend columns
+  and compact spacing.
 
 ## 2026-09-04
 

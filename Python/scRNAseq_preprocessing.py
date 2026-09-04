@@ -442,6 +442,7 @@ def plot_anndata_group_umap(
     legend_title_size: float = 9,
     legend_gap_cm: float = 0.25,
     legend_width_cm: float = 2.5,
+    legend_ncol: int = 2,
     title: str | None = None,
     xlabel: str = "UMAP1",
     ylabel: str = "UMAP2",
@@ -517,6 +518,9 @@ def plot_anndata_group_umap(
         Horizontal gap before the legend area in centimetres.
     legend_width_cm : float, default=2.5
         Width reserved for the legend in centimetres.
+    legend_ncol : int, default=2
+        Number of columns used to arrange legend entries. Multi-column legends
+        use compact column and marker-to-label spacing.
     title : str, optional
         Plot title. No title is drawn when omitted.
     xlabel : str, default="UMAP1"
@@ -790,6 +794,9 @@ def plot_anndata_group_umap(
             borderaxespad=0,
             fontsize=legend_fontsize,
             title_fontsize=legend_title_size,
+            ncol=legend_ncol,
+            columnspacing=1.2,
+            handletextpad=0.5,
         )
 
     # Save only when the caller explicitly supplies an output path.
