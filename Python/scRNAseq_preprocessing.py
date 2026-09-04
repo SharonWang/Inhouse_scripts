@@ -13,15 +13,21 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 from scipy import sparse
 
 if TYPE_CHECKING:
     from anndata import AnnData
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
 
 
 __all__ = [
     "convert_genes_to_features",
     "ordmag_filter",
+    "plot_anndata_group_umap",
     "read_one_gsm",
     "trim_axs",
 ]
@@ -412,3 +418,362 @@ def trim_axs(axs: Any, N: int) -> np.ndarray:
         ax.remove()
 
     return axes[:N]
+
+
+def plot_anndata_group_umap(
+    adata: AnnData,
+    group_col: str,
+    palette: dict[Any, Any] | None = None,
+    point_size: float = 18,
+    point_alpha: float = 0.5,
+    na_color: Any = "#D3D3D3",
+    umap_key: str = "X_umap",
+    width_cm: float = 4,
+    height_cm: float = 4,
+    left_cm: float = 1.30,
+    right_cm: float = 0.30,
+    bottom_cm: float = 1.10,
+    top_cm: float = 0.35,
+    show_legend: bool = True,
+    legend_title: str | None = None,
+    legend_marker_size: float = 6,
+    legend_fontsize: float = 8,
+    legend_title_size: float = 9,
+    legend_gap_cm: float = 0.25,
+    legend_width_cm: float = 2.5,
+    title: str | None = None,
+    xlabel: str = "UMAP1",
+    ylabel: str = "UMAP2",
+    axis_label_size: float = 10,
+    title_size: float = 11,
+    tick_label_size: float = 8,
+    spine_width: float = 1.0,
+    tick_width: float = 1.0,
+    tick_length: float = 3,
+    tick_nbins: int = 4,
+    padding_fraction: float = 0.03,
+    rasterized: bool = False,
+    transparent: bool = True,
+    save: str | Path | None = None,
+    dpi: float = 600,
+) -> tuple[Figure, Axes]:
+    """Plot one categorical AnnData annotation on precomputed UMAP coordinates.
+
+    All cells are drawn with one scatter call. When ``rasterized=True``, this
+    normally produces one raster layer for the points in PDF or SVG output,
+    while axes, labels, title, ticks, and legend remain editable vector objects.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object whose ``obs`` table contains ``group_col`` and whose
+        ``obsm`` mapping contains two-dimensional UMAP coordinates.
+    group_col : str
+        Name of the categorical column in ``adata.obs`` used to colour cells.
+        Non-categorical values are converted to a pandas categorical series.
+    palette : dict, optional
+        Mapping from every observed non-missing group to a Matplotlib-compatible
+        colour. If omitted, colours are read from
+        ``adata.uns[f"{group_col}_colors"]`` when available; otherwise the
+        Matplotlib ``tab20`` colour map is used. A supplied mapping is not
+        modified or stored in ``adata``.
+    point_size : float, default=18
+        Marker area passed to ``Axes.scatter`` in points squared.
+    point_alpha : float, default=0.5
+        Opacity of plotted cell markers.
+    na_color : color, default="#D3D3D3"
+        Matplotlib-compatible colour used for cells with missing group values.
+    umap_key : str, default="X_umap"
+        Key in ``adata.obsm`` containing at least two UMAP coordinate columns.
+    width_cm : float, default=4
+        Physical width of the UMAP plotting box in centimetres.
+    height_cm : float, default=4
+        Physical height of the UMAP plotting box in centimetres.
+    left_cm : float, default=1.30
+        Space to the left of the plotting box in centimetres.
+    right_cm : float, default=0.30
+        Space between the plotting box and optional legend area in centimetres.
+    bottom_cm : float, default=1.10
+        Space below the plotting box in centimetres.
+    top_cm : float, default=0.35
+        Space above the plotting box in centimetres.
+    show_legend : bool, default=True
+        Whether to create a figure-level legend for groups and missing values.
+    legend_title : str, optional
+        Legend heading. Defaults to ``group_col`` when the legend is displayed.
+    legend_marker_size : float, default=6
+        Diameter of legend markers in points.
+    legend_fontsize : float, default=8
+        Font size of legend labels in points.
+    legend_title_size : float, default=9
+        Font size of the legend title in points.
+    legend_gap_cm : float, default=0.25
+        Horizontal gap before the legend area in centimetres.
+    legend_width_cm : float, default=2.5
+        Width reserved for the legend in centimetres.
+    title : str, optional
+        Plot title. No title is drawn when omitted.
+    xlabel : str, default="UMAP1"
+        Label displayed on the horizontal axis.
+    ylabel : str, default="UMAP2"
+        Label displayed on the vertical axis.
+    axis_label_size : float, default=10
+        Font size of both axis labels in points.
+    title_size : float, default=11
+        Font size of the title in points.
+    tick_label_size : float, default=8
+        Font size of axis tick labels in points.
+    spine_width : float, default=1.0
+        Line width of the visible left and bottom axes spines.
+    tick_width : float, default=1.0
+        Line width of major tick marks.
+    tick_length : float, default=3
+        Length of major tick marks in points.
+    tick_nbins : int, default=4
+        Maximum approximate number of integer major tick intervals per axis.
+    padding_fraction : float, default=0.03
+        Fraction of each coordinate range added to both sides of its axis. A
+        fixed padding of one is used when a coordinate range is zero.
+    rasterized : bool, default=False
+        Whether to rasterize the single scatter collection in vector output.
+    transparent : bool, default=True
+        Whether saved figures use a transparent background.
+    save : str or pathlib.Path, optional
+        Output filename passed to ``Figure.savefig``. The figure is not written
+        when omitted.
+    dpi : float, default=600
+        Resolution passed to ``Figure.savefig`` when ``save`` is provided.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Newly created figure, sized from the requested centimetre dimensions.
+    ax : matplotlib.axes.Axes
+        Axes containing the UMAP scatter plot.
+
+    Raises
+    ------
+    KeyError
+        If ``group_col`` is absent from ``adata.obs``, ``umap_key`` is absent
+        from ``adata.obsm``, or a supplied palette lacks an observed group.
+    ValueError
+        If the UMAP array is not two-dimensional with at least two columns, its
+        row count differs from ``adata.n_obs``, no non-missing groups exist, or
+        stored AnnData colours do not match all categorical levels.
+
+    Examples
+    --------
+    >>> fig, ax = plot_anndata_group_umap(
+    ...     adata,
+    ...     group_col="cell_type",
+    ...     rasterized=True,
+    ...     save="cell_type_umap.pdf",
+    ... )
+
+    Notes
+    -----
+    Cells with missing group values are drawn first. Remaining cells are drawn
+    in categorical order so non-missing annotations remain visible above them.
+    """
+    # -------------------------------------------------------------------------
+    # Validate the AnnData inputs and UMAP coordinates.
+    # -------------------------------------------------------------------------
+    if group_col not in adata.obs.columns:
+        raise KeyError(f"'{group_col}' was not found in adata.obs.")
+
+    if umap_key not in adata.obsm:
+        raise KeyError(f"'{umap_key}' was not found in adata.obsm.")
+
+    umap_xy = np.asarray(adata.obsm[umap_key])
+
+    if umap_xy.ndim != 2 or umap_xy.shape[1] < 2:
+        raise ValueError(
+            f"adata.obsm['{umap_key}'] must contain at least two columns."
+        )
+
+    if umap_xy.shape[0] != adata.n_obs:
+        raise ValueError(
+            f"adata.obsm['{umap_key}'] has {umap_xy.shape[0]} rows, "
+            f"but adata has {adata.n_obs} cells."
+        )
+
+    # -------------------------------------------------------------------------
+    # Normalize group information and omit unused categorical levels.
+    # -------------------------------------------------------------------------
+    group_values = adata.obs[group_col].copy()
+
+    if not isinstance(group_values.dtype, pd.CategoricalDtype):
+        group_values = group_values.astype("category")
+
+    all_categories = list(group_values.cat.categories)
+    groups = [group for group in all_categories if (group_values == group).any()]
+
+    if not groups:
+        raise ValueError(f"No non-missing groups found in '{group_col}'.")
+
+    # -------------------------------------------------------------------------
+    # Resolve a complete palette for the groups that are present.
+    # -------------------------------------------------------------------------
+    color_key = f"{group_col}_colors"
+
+    if palette is None:
+        if color_key in adata.uns:
+            stored_colors = list(adata.uns[color_key])
+
+            if len(stored_colors) != len(all_categories):
+                raise ValueError(
+                    f"adata.obs['{group_col}'] has {len(all_categories)} "
+                    f"categories, but adata.uns['{color_key}'] has "
+                    f"{len(stored_colors)} colours."
+                )
+
+            full_palette = dict(zip(all_categories, stored_colors))
+            palette = {group: full_palette[group] for group in groups}
+        else:
+            cmap = plt.get_cmap("tab20")
+            palette = {group: cmap(i % 20) for i, group in enumerate(groups)}
+    else:
+        missing = [group for group in groups if group not in palette]
+        if missing:
+            raise KeyError(
+                "No colour supplied for: " + ", ".join(map(str, missing))
+            )
+
+    # -------------------------------------------------------------------------
+    # Calculate coordinate limits and the exact physical figure dimensions.
+    # -------------------------------------------------------------------------
+    x = umap_xy[:, 0]
+    y = umap_xy[:, 1]
+    x_range = np.ptp(x)
+    y_range = np.ptp(y)
+    x_pad = padding_fraction * x_range if x_range > 0 else 1
+    y_pad = padding_fraction * y_range if y_range > 0 else 1
+    xlim = (np.nanmin(x) - x_pad, np.nanmax(x) + x_pad)
+    ylim = (np.nanmin(y) - y_pad, np.nanmax(y) + y_pad)
+
+    extra_legend_cm = legend_gap_cm + legend_width_cm if show_legend else 0
+    figure_width_cm = left_cm + width_cm + right_cm + extra_legend_cm
+    figure_height_cm = bottom_cm + height_cm + top_cm
+    cm_to_inch = 1 / 2.54
+
+    fig = plt.figure(
+        figsize=(figure_width_cm * cm_to_inch, figure_height_cm * cm_to_inch)
+    )
+    ax = fig.add_axes(
+        [
+            left_cm / figure_width_cm,
+            bottom_cm / figure_height_cm,
+            width_cm / figure_width_cm,
+            height_cm / figure_height_cm,
+        ]
+    )
+
+    # -------------------------------------------------------------------------
+    # Build per-cell colours and draw missing values before annotated groups.
+    # -------------------------------------------------------------------------
+    colors = np.array([na_color] * adata.n_obs, dtype=object)
+    order_rank = np.full(adata.n_obs, fill_value=-1, dtype=int)
+    order_rank[group_values.isna().to_numpy()] = 0
+
+    for i, group in enumerate(groups, start=1):
+        mask = (group_values == group).to_numpy()
+        colors[mask] = palette[group]
+        order_rank[mask] = i
+
+    order = np.argsort(order_rank, kind="stable")
+    points = ax.scatter(
+        x[order],
+        y[order],
+        s=point_size,
+        c=colors[order],
+        alpha=point_alpha,
+        linewidths=0,
+        edgecolors="none",
+        rasterized=rasterized,
+        zorder=2,
+    )
+    points.set_gid("all_umap_dots")
+
+    # -------------------------------------------------------------------------
+    # Format axes, labels, and optional title.
+    # -------------------------------------------------------------------------
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_box_aspect(height_cm / width_cm)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(spine_width)
+    ax.spines["bottom"].set_linewidth(spine_width)
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=tick_label_size,
+        width=tick_width,
+        length=tick_length,
+        direction="out",
+    )
+    ax.grid(False)
+    ax.set_xlabel(xlabel, fontsize=axis_label_size)
+    ax.set_ylabel(ylabel, fontsize=axis_label_size)
+
+    if title is not None:
+        ax.set_title(title, fontsize=title_size, fontweight="normal", pad=8)
+
+    # -------------------------------------------------------------------------
+    # Create a vector legend independently of the scatter collection.
+    # -------------------------------------------------------------------------
+    if show_legend:
+        if legend_title is None:
+            legend_title = group_col
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="",
+                markerfacecolor=palette[group],
+                markeredgecolor="none",
+                alpha=1.0,
+                markersize=legend_marker_size,
+                label=str(group),
+            )
+            for group in groups
+        ]
+
+        if group_values.isna().any():
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="",
+                    markerfacecolor=na_color,
+                    markeredgecolor="none",
+                    alpha=1.0,
+                    markersize=legend_marker_size,
+                    label="NA",
+                )
+            )
+
+        legend_left_cm = left_cm + width_cm + right_cm + legend_gap_cm
+        legend_x = legend_left_cm / figure_width_cm
+        fig.legend(
+            handles=legend_handles,
+            title=legend_title,
+            frameon=False,
+            loc="center left",
+            bbox_to_anchor=(legend_x, 0.5),
+            bbox_transform=fig.transFigure,
+            borderaxespad=0,
+            fontsize=legend_fontsize,
+            title_fontsize=legend_title_size,
+        )
+
+    # Save only when the caller explicitly supplies an output path.
+    if save is not None:
+        fig.savefig(save, dpi=dpi, transparent=transparent)
+
+    return fig, ax

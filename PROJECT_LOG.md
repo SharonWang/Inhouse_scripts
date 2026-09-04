@@ -4,6 +4,29 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-09-05
+
+### Added
+
+- Added `plot_anndata_group_umap()` to the Python visualization section for
+  publication-sized categorical UMAP plots from AnnData objects.
+- Preserved its single-scatter-call behavior so points can be rasterized as one
+  layer while axes, labels, title, and legend remain vector objects.
+- Documented all layout, palette, styling, legend, coordinate, rasterization,
+  saving, and return parameters.
+
+### Verification
+
+- Automated tests were not added or run, following the user's standing
+  instruction.
+- Reviewed the function organization, documentation, and Git diff before
+  committing.
+
+### Commit
+
+- `feat: add categorical AnnData UMAP plotter` — Added the UMAP plotting
+  utility and this log entry.
+
 ## 2026-09-04
 
 ### Added
