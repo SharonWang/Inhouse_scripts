@@ -65,6 +65,23 @@ invalid directory, the absence of matching files, or a source file with fewer
 than two columns will raise a clear exception. Existing outputs will never be
 modified unless the caller explicitly sets `overwrite=True`.
 
+## Plotting Utility
+
+The Python pipeline will provide `trim_axs(axs, N)` for plot layouts used in
+single-cell RNA-seq quality-control and exploratory figures. It will:
+
+1. Accept an array-like Matplotlib axes collection and a requested axes count.
+2. Flatten the axes collection into a one-dimensional NumPy array.
+3. Validate that the requested count is an integer between zero and the number
+   of available axes, inclusive.
+4. Remove every surplus axis from its parent figure.
+5. Return the first `N` axes as a one-dimensional NumPy array.
+
+The public function name and parameter names will remain `trim_axs(axs, N)` for
+compatibility with the supplied code. Invalid axes containers or requested
+counts will raise clear exceptions rather than silently returning fewer axes
+than requested.
+
 ## Documentation and Style
 
 Python functions will use type hints and Google-style docstrings that document
@@ -87,6 +104,8 @@ reader so that discovery, prefix derivation, metadata creation, and error paths
 can be verified without downloading GEO data. The legacy feature converter will
 be tested with temporary gzip-compressed fixtures covering successful
 conversion, existing-output skipping, explicit overwriting, missing inputs, and
-malformed inputs. The Python module will also be syntax-checked. The R script
-will be parse-checked if an R runtime is available; otherwise its initialization
-will be recorded as not executable until an R function is added.
+malformed inputs. The plotting utility will be tested with a non-interactive
+Matplotlib backend, including multi-dimensional axes, surplus-axis removal, and
+invalid requested counts. The Python module will also be syntax-checked. The R
+script will be parse-checked if an R runtime is available; otherwise its
+initialization will be recorded as not executable until an R function is added.
