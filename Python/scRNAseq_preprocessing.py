@@ -428,6 +428,7 @@ def plot_anndata_group_umap(
     point_alpha: float = 0.5,
     na_color: Any = "#D3D3D3",
     umap_key: str = "X_umap",
+    top_group: Any | None = None,
     width_cm: float = 4,
     height_cm: float = 4,
     left_cm: float = 1.30,
@@ -485,6 +486,11 @@ def plot_anndata_group_umap(
         Matplotlib-compatible colour used for cells with missing group values.
     umap_key : str, default="X_umap"
         Key in ``adata.obsm`` containing at least two UMAP coordinate columns.
+    top_group : optional
+        Category to draw after all other groups so its cells appear visually on
+        top. The value must exactly match one of the observed, non-missing
+        categories in ``group_col``. By default, normal categorical plotting
+        order is used without prioritizing one group.
     width_cm : float, default=4
         Physical width of the UMAP plotting box in centimetres.
     height_cm : float, default=4
@@ -559,7 +565,8 @@ def plot_anndata_group_umap(
     ValueError
         If the UMAP array is not two-dimensional with at least two columns, its
         row count differs from ``adata.n_obs``, no non-missing groups exist, or
-        stored AnnData colours do not match all categorical levels.
+        stored AnnData colours do not match all categorical levels. Also raised
+        when ``top_group`` is not an observed group.
 
     Examples
     --------
@@ -574,6 +581,7 @@ def plot_anndata_group_umap(
     -----
     Cells with missing group values are drawn first. Remaining cells are drawn
     in categorical order so non-missing annotations remain visible above them.
+    When supplied, ``top_group`` is drawn last without changing legend order.
     """
     # -------------------------------------------------------------------------
     # Validate the AnnData inputs and UMAP coordinates.
@@ -610,6 +618,12 @@ def plot_anndata_group_umap(
 
     if not groups:
         raise ValueError(f"No non-missing groups found in '{group_col}'.")
+
+    if top_group is not None and top_group not in groups:
+        raise ValueError(
+            f"top_group={top_group!r} was not found in "
+            f"adata.obs['{group_col}']. Available groups: {groups}"
+        )
 
     # -------------------------------------------------------------------------
     # Resolve a complete palette for the groups that are present.
@@ -679,6 +693,12 @@ def plot_anndata_group_umap(
         mask = (group_values == group).to_numpy()
         colors[mask] = palette[group]
         order_rank[mask] = i
+
+    # Promote the selected group above every other category while retaining
+    # stable cell order within that group.
+    if top_group is not None:
+        top_mask = (group_values == top_group).to_numpy()
+        order_rank[top_mask] = len(groups) + 1
 
     order = np.argsort(order_rank, kind="stable")
     points = ax.scatter(

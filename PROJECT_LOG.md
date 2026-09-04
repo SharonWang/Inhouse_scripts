@@ -15,6 +15,12 @@ preprocessing pipelines. All project files are maintained under
 - Documented all layout, palette, styling, legend, coordinate, rasterization,
   saving, and return parameters.
 
+### Changed
+
+- Extended `plot_anndata_group_umap()` with the optional `top_group` parameter.
+  A selected category is validated and drawn last so it remains visually above
+  all other cells without changing categorical legend order.
+
 ### Verification
 
 - Automated tests were not added or run, following the user's standing
@@ -26,6 +32,8 @@ preprocessing pipelines. All project files are maintained under
 
 - `feat: add categorical AnnData UMAP plotter` — Added the UMAP plotting
   utility and this log entry.
+- `feat: support top group in AnnData UMAP plots` — Added foreground plotting
+  for a selected annotation group.
 
 ## 2026-09-04
 
