@@ -22,6 +22,13 @@ preprocessing pipelines. All project files are maintained under
   all other cells without changing categorical legend order.
 - Extended `plot_anndata_group_umap()` with `legend_ncol` for configurable
   multi-column legends and compact inter-column and marker-to-label spacing.
+- Expanded `plot_anndata_group_umap()` with `split_by` and `split_categories`.
+  It now supports one unsplit UMAP, subset panels split by another annotation,
+  or full-data highlight panels when splitting by `group_col` itself.
+- Added exact per-panel sizing, configurable panel gaps and titles, shared or
+  panel-specific coordinate limits, far-left-only y-axes, and configurable
+  legend column spacing. The function now consistently returns a one-dimensional
+  NumPy array of axes, including for an unsplit plot.
 
 ### Verification
 
@@ -38,6 +45,8 @@ preprocessing pipelines. All project files are maintained under
   for a selected annotation group.
 - `feat: support multi-column UMAP legends` — Added configurable legend columns
   and compact spacing.
+- `feat: add split-panel AnnData UMAP plotting` — Added split and highlight
+  modes with exact multi-panel layout controls.
 
 ## 2026-09-04
 

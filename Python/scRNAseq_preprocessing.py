@@ -7,6 +7,7 @@ complete docstring describing their inputs, outputs, side effects, and errors.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -423,6 +424,8 @@ def trim_axs(axs: Any, N: int) -> np.ndarray:
 def plot_anndata_group_umap(
     adata: AnnData,
     group_col: str,
+    split_by: str | None = None,
+    split_categories: Iterable[Any] | None = None,
     palette: dict[Any, Any] | None = None,
     point_size: float = 18,
     point_alpha: float = 0.5,
@@ -431,39 +434,47 @@ def plot_anndata_group_umap(
     top_group: Any | None = None,
     width_cm: float = 4,
     height_cm: float = 4,
-    left_cm: float = 1.30,
-    right_cm: float = 0.30,
-    bottom_cm: float = 1.10,
-    top_cm: float = 0.35,
+    left_cm: float = 1.20,
+    right_cm: float = 0.25,
+    bottom_cm: float = 1.05,
+    top_cm: float = 0.45,
+    panel_gap_cm: float = 0.50,
     show_legend: bool = True,
     legend_title: str | None = None,
     legend_marker_size: float = 6,
     legend_fontsize: float = 8,
     legend_title_size: float = 9,
-    legend_gap_cm: float = 0.25,
-    legend_width_cm: float = 2.5,
+    legend_gap_cm: float = 0.35,
+    legend_width_cm: float = 3.5,
     legend_ncol: int = 2,
+    legend_columnspacing: float = 1.2,
+    legend_handletextpad: float = 0.5,
     title: str | None = None,
     xlabel: str = "UMAP1",
     ylabel: str = "UMAP2",
     axis_label_size: float = 10,
     title_size: float = 11,
+    split_title_size: float = 10,
     tick_label_size: float = 8,
     spine_width: float = 1.0,
     tick_width: float = 1.0,
     tick_length: float = 3,
     tick_nbins: int = 4,
     padding_fraction: float = 0.03,
+    shared_limits: bool = True,
     rasterized: bool = False,
     transparent: bool = True,
     save: str | Path | None = None,
     dpi: float = 600,
-) -> tuple[Figure, Axes]:
-    """Plot one categorical AnnData annotation on precomputed UMAP coordinates.
+) -> tuple[Figure, np.ndarray]:
+    """Plot categorical AnnData annotations on one or more UMAP panels.
 
-    All cells are drawn with one scatter call. When ``rasterized=True``, this
-    normally produces one raster layer for the points in PDF or SVG output,
-    while axes, labels, title, ticks, and legend remain editable vector objects.
+    With no split, one UMAP is coloured by ``group_col``. Splitting by another
+    annotation creates one cell-subset panel per split category. Splitting by
+    ``group_col`` instead creates highlight panels: every panel contains all
+    cells, but only its selected category is coloured and drawn on top. Each
+    panel uses one scatter call, allowing points to be rasterized together while
+    axes, labels, titles, ticks, and the legend remain vector objects.
 
     Parameters
     ----------
@@ -473,6 +484,15 @@ def plot_anndata_group_umap(
     group_col : str
         Name of the categorical column in ``adata.obs`` used to colour cells.
         Non-categorical values are converted to a pandas categorical series.
+    split_by : str, optional
+        Annotation column used to create multiple panels. If different from
+        ``group_col``, each panel contains only cells from one split category.
+        If equal to ``group_col``, each panel contains all cells and highlights
+        one group. If omitted, a single unsplit panel is drawn.
+    split_categories : iterable, optional
+        Ordered subset of observed ``split_by`` categories to plot. By default,
+        every observed category is used in categorical order. Ignored when
+        ``split_by`` is omitted.
     palette : dict, optional
         Mapping from every observed non-missing group to a Matplotlib-compatible
         colour. If omitted, colours are read from
@@ -490,20 +510,22 @@ def plot_anndata_group_umap(
     top_group : optional
         Category to draw after all other groups so its cells appear visually on
         top. The value must exactly match one of the observed, non-missing
-        categories in ``group_col``. By default, normal categorical plotting
-        order is used without prioritizing one group.
+        categories in ``group_col``. This affects unsplit and normal split
+        panels; highlight panels always draw their selected group last.
     width_cm : float, default=4
-        Physical width of the UMAP plotting box in centimetres.
+        Physical width of each UMAP plotting box in centimetres.
     height_cm : float, default=4
-        Physical height of the UMAP plotting box in centimetres.
-    left_cm : float, default=1.30
-        Space to the left of the plotting box in centimetres.
-    right_cm : float, default=0.30
-        Space between the plotting box and optional legend area in centimetres.
-    bottom_cm : float, default=1.10
+        Physical height of each UMAP plotting box in centimetres.
+    left_cm : float, default=1.20
+        Space to the left of the first plotting box in centimetres.
+    right_cm : float, default=0.25
+        Space after the last plotting box in centimetres.
+    bottom_cm : float, default=1.05
         Space below the plotting box in centimetres.
-    top_cm : float, default=0.35
+    top_cm : float, default=0.45
         Space above the plotting box in centimetres.
+    panel_gap_cm : float, default=0.50
+        Horizontal gap between adjacent UMAP panels in centimetres.
     show_legend : bool, default=True
         Whether to create a figure-level legend for groups and missing values.
     legend_title : str, optional
@@ -514,13 +536,16 @@ def plot_anndata_group_umap(
         Font size of legend labels in points.
     legend_title_size : float, default=9
         Font size of the legend title in points.
-    legend_gap_cm : float, default=0.25
+    legend_gap_cm : float, default=0.35
         Horizontal gap before the legend area in centimetres.
-    legend_width_cm : float, default=2.5
+    legend_width_cm : float, default=3.5
         Width reserved for the legend in centimetres.
     legend_ncol : int, default=2
-        Number of columns used to arrange legend entries. Multi-column legends
-        use compact column and marker-to-label spacing.
+        Number of columns used to arrange legend entries.
+    legend_columnspacing : float, default=1.2
+        Horizontal spacing between legend columns in font-size units.
+    legend_handletextpad : float, default=0.5
+        Gap between each legend marker and its label in font-size units.
     title : str, optional
         Plot title. No title is drawn when omitted.
     xlabel : str, default="UMAP1"
@@ -530,7 +555,9 @@ def plot_anndata_group_umap(
     axis_label_size : float, default=10
         Font size of both axis labels in points.
     title_size : float, default=11
-        Font size of the title in points.
+        Font size of the overall figure title in points.
+    split_title_size : float, default=10
+        Font size of category titles shown above split panels.
     tick_label_size : float, default=8
         Font size of axis tick labels in points.
     spine_width : float, default=1.0
@@ -544,8 +571,11 @@ def plot_anndata_group_umap(
     padding_fraction : float, default=0.03
         Fraction of each coordinate range added to both sides of its axis. A
         fixed padding of one is used when a coordinate range is zero.
+    shared_limits : bool, default=True
+        Whether every split panel uses limits calculated from all cells. When
+        ``False``, each panel derives limits from the cells it displays.
     rasterized : bool, default=False
-        Whether to rasterize the single scatter collection in vector output.
+        Whether to rasterize each panel's scatter collection in vector output.
     transparent : bool, default=True
         Whether saved figures use a transparent background.
     save : str or pathlib.Path, optional
@@ -558,40 +588,47 @@ def plot_anndata_group_umap(
     -------
     fig : matplotlib.figure.Figure
         Newly created figure, sized from the requested centimetre dimensions.
-    ax : matplotlib.axes.Axes
-        Axes containing the UMAP scatter plot.
+    axes : numpy.ndarray
+        One-dimensional object array containing the UMAP axes in split-category
+        order. An unsplit plot returns an array containing one Axes object.
 
     Raises
     ------
     KeyError
-        If ``group_col`` is absent from ``adata.obs``, ``umap_key`` is absent
-        from ``adata.obsm``, or a supplied palette lacks an observed group.
+        If ``group_col`` or ``split_by`` is absent from ``adata.obs``,
+        ``umap_key`` is absent from ``adata.obsm``, or a supplied palette lacks
+        an observed group.
     ValueError
         If the UMAP array is not two-dimensional with at least two columns, its
         row count differs from ``adata.n_obs``, no non-missing groups exist, or
         stored AnnData colours do not match all categorical levels. Also raised
-        when ``top_group`` is not an observed group.
+        when ``top_group`` is not an observed group, a requested split category
+        is unavailable, or no split panels can be created.
 
     Examples
     --------
-    >>> fig, ax = plot_anndata_group_umap(
+    >>> fig, axes = plot_anndata_group_umap(
     ...     adata,
     ...     group_col="cell_type",
+    ...     split_by="sample",
     ...     rasterized=True,
     ...     save="cell_type_umap.pdf",
     ... )
 
     Notes
     -----
-    Cells with missing group values are drawn first. Remaining cells are drawn
-    in categorical order so non-missing annotations remain visible above them.
-    When supplied, ``top_group`` is drawn last without changing legend order.
+    In split mode only the far-left panel retains its y-axis. Category and split
+    order follow pandas categorical order. ``top_group`` changes drawing order
+    without changing the legend order.
     """
     # -------------------------------------------------------------------------
     # Validate the AnnData inputs and UMAP coordinates.
     # -------------------------------------------------------------------------
     if group_col not in adata.obs.columns:
         raise KeyError(f"'{group_col}' was not found in adata.obs.")
+
+    if split_by is not None and split_by not in adata.obs.columns:
+        raise KeyError(f"'{split_by}' was not found in adata.obs.")
 
     if umap_key not in adata.obsm:
         raise KeyError(f"'{umap_key}' was not found in adata.obsm.")
@@ -658,96 +695,197 @@ def plot_anndata_group_umap(
             )
 
     # -------------------------------------------------------------------------
-    # Calculate coordinate limits and the exact physical figure dimensions.
+    # Resolve the ordered set of panels.
     # -------------------------------------------------------------------------
-    x = umap_xy[:, 0]
-    y = umap_xy[:, 1]
-    x_range = np.ptp(x)
-    y_range = np.ptp(y)
+    if split_by is None:
+        split_levels = [None]
+    else:
+        split_values = adata.obs[split_by].copy()
+        if not isinstance(split_values.dtype, pd.CategoricalDtype):
+            split_values = split_values.astype("category")
+
+        available_split_levels = [
+            level
+            for level in split_values.cat.categories
+            if (split_values == level).any()
+        ]
+
+        if split_categories is None:
+            split_levels = available_split_levels
+        else:
+            requested_split_levels = list(split_categories)
+            missing_split = [
+                level
+                for level in requested_split_levels
+                if level not in available_split_levels
+            ]
+            if missing_split:
+                raise ValueError(
+                    "These split categories were not found: "
+                    + ", ".join(map(str, missing_split))
+                )
+            split_levels = requested_split_levels
+
+    if not split_levels:
+        raise ValueError("No split categories available to plot.")
+
+    # -------------------------------------------------------------------------
+    # Calculate shared limits and exact multi-panel figure dimensions.
+    # -------------------------------------------------------------------------
+    x_all = umap_xy[:, 0]
+    y_all = umap_xy[:, 1]
+    x_range = np.ptp(x_all)
+    y_range = np.ptp(y_all)
     x_pad = padding_fraction * x_range if x_range > 0 else 1
     y_pad = padding_fraction * y_range if y_range > 0 else 1
-    xlim = (np.nanmin(x) - x_pad, np.nanmax(x) + x_pad)
-    ylim = (np.nanmin(y) - y_pad, np.nanmax(y) + y_pad)
+    global_xlim = (np.nanmin(x_all) - x_pad, np.nanmax(x_all) + x_pad)
+    global_ylim = (np.nanmin(y_all) - y_pad, np.nanmax(y_all) + y_pad)
 
-    extra_legend_cm = legend_gap_cm + legend_width_cm if show_legend else 0
-    figure_width_cm = left_cm + width_cm + right_cm + extra_legend_cm
+    n_panels = len(split_levels)
+    plot_area_width_cm = n_panels * width_cm + (n_panels - 1) * panel_gap_cm
+    legend_extra_cm = legend_gap_cm + legend_width_cm if show_legend else 0
+    figure_width_cm = (
+        left_cm + plot_area_width_cm + right_cm + legend_extra_cm
+    )
     figure_height_cm = bottom_cm + height_cm + top_cm
     cm_to_inch = 1 / 2.54
-
     fig = plt.figure(
         figsize=(figure_width_cm * cm_to_inch, figure_height_cm * cm_to_inch)
     )
-    ax = fig.add_axes(
-        [
-            left_cm / figure_width_cm,
-            bottom_cm / figure_height_cm,
-            width_cm / figure_width_cm,
-            height_cm / figure_height_cm,
-        ]
-    )
+
+    axes: list[Axes] = []
 
     # -------------------------------------------------------------------------
-    # Build per-cell colours and draw missing values before annotated groups.
+    # Build and format each UMAP panel.
     # -------------------------------------------------------------------------
-    colors = np.array([na_color] * adata.n_obs, dtype=object)
-    order_rank = np.full(adata.n_obs, fill_value=-1, dtype=int)
-    order_rank[group_values.isna().to_numpy()] = 0
+    for panel_i, split_level in enumerate(split_levels):
+        panel_left_cm = left_cm + panel_i * (width_cm + panel_gap_cm)
+        ax = fig.add_axes(
+            [
+                panel_left_cm / figure_width_cm,
+                bottom_cm / figure_height_cm,
+                width_cm / figure_width_cm,
+                height_cm / figure_height_cm,
+            ]
+        )
+        axes.append(ax)
 
-    for i, group in enumerate(groups, start=1):
-        mask = (group_values == group).to_numpy()
-        colors[mask] = palette[group]
-        order_rank[mask] = i
+        # Highlight mode keeps every cell and colours only the selected group.
+        if split_by == group_col:
+            x = x_all
+            y = y_all
+            panel_groups = group_values.copy()
+            colors = np.full(adata.n_obs, na_color, dtype=object)
+            selected_mask = (panel_groups == split_level).to_numpy()
+            colors[selected_mask] = palette[split_level]
+            order_rank = np.zeros(adata.n_obs, dtype=int)
+            order_rank[selected_mask] = 1
+        else:
+            # Normal mode uses every cell when unsplit or a split-level subset.
+            if split_by is None:
+                panel_mask = np.ones(adata.n_obs, dtype=bool)
+            else:
+                panel_mask = (adata.obs[split_by] == split_level).to_numpy()
 
-    # Promote the selected group above every other category while retaining
-    # stable cell order within that group.
-    if top_group is not None:
-        top_mask = (group_values == top_group).to_numpy()
-        order_rank[top_mask] = len(groups) + 1
+            panel_idx = np.where(panel_mask)[0]
+            x = x_all[panel_idx]
+            y = y_all[panel_idx]
+            panel_groups = group_values.iloc[panel_idx]
+            colors = np.full(len(panel_idx), na_color, dtype=object)
+            order_rank = np.zeros(len(panel_idx), dtype=int)
 
-    order = np.argsort(order_rank, kind="stable")
-    points = ax.scatter(
-        x[order],
-        y[order],
-        s=point_size,
-        c=colors[order],
-        alpha=point_alpha,
-        linewidths=0,
-        edgecolors="none",
-        rasterized=rasterized,
-        zorder=2,
-    )
-    points.set_gid("all_umap_dots")
+            for group_i, group in enumerate(groups, start=1):
+                mask = (panel_groups == group).to_numpy()
+                colors[mask] = palette[group]
+                order_rank[mask] = group_i
 
-    # -------------------------------------------------------------------------
-    # Format axes, labels, and optional title.
-    # -------------------------------------------------------------------------
-    ax.set_xlim(xlim)
-    ax.set_ylim(ylim)
-    ax.set_box_aspect(height_cm / width_cm)
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(spine_width)
-    ax.spines["bottom"].set_linewidth(spine_width)
-    ax.tick_params(
-        axis="both",
-        which="major",
-        labelsize=tick_label_size,
-        width=tick_width,
-        length=tick_length,
-        direction="out",
-    )
-    ax.grid(False)
-    ax.set_xlabel(xlabel, fontsize=axis_label_size)
-    ax.set_ylabel(ylabel, fontsize=axis_label_size)
+            if top_group is not None:
+                top_mask = (panel_groups == top_group).to_numpy()
+                order_rank[top_mask] = len(groups) + 1
 
+        # Stable sorting preserves original cell order within each category.
+        order = np.argsort(order_rank, kind="stable")
+        points = ax.scatter(
+            x[order],
+            y[order],
+            s=point_size,
+            c=colors[order],
+            alpha=point_alpha,
+            linewidths=0,
+            edgecolors="none",
+            rasterized=rasterized,
+            zorder=2,
+        )
+        points.set_gid(
+            "all_umap_dots"
+            if split_by is None
+            else f"umap_dots_{split_level}"
+        )
+
+        if shared_limits:
+            ax.set_xlim(global_xlim)
+            ax.set_ylim(global_ylim)
+        else:
+            local_x_range = np.ptp(x)
+            local_y_range = np.ptp(y)
+            local_x_pad = (
+                padding_fraction * local_x_range if local_x_range > 0 else 1
+            )
+            local_y_pad = (
+                padding_fraction * local_y_range if local_y_range > 0 else 1
+            )
+            ax.set_xlim(np.nanmin(x) - local_x_pad, np.nanmax(x) + local_x_pad)
+            ax.set_ylim(np.nanmin(y) - local_y_pad, np.nanmax(y) + local_y_pad)
+
+        ax.set_box_aspect(height_cm / width_cm)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_linewidth(spine_width)
+        ax.spines["bottom"].set_linewidth(spine_width)
+        ax.tick_params(
+            axis="both",
+            which="major",
+            labelsize=tick_label_size,
+            width=tick_width,
+            length=tick_length,
+            direction="out",
+        )
+        ax.grid(False)
+        ax.set_xlabel(xlabel, fontsize=axis_label_size)
+
+        # Only the far-left split panel retains the y-axis and its label.
+        if panel_i == 0:
+            ax.set_ylabel(ylabel, fontsize=axis_label_size)
+        else:
+            ax.set_ylabel("")
+            ax.spines["left"].set_visible(False)
+            ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+
+        if split_by is not None:
+            ax.set_title(
+                str(split_level),
+                fontsize=split_title_size,
+                fontweight="normal",
+                pad=7,
+            )
+
+    axes_array = np.asarray(axes, dtype=object)
+
+    # Place an overall title above the centre of the combined plotting area.
     if title is not None:
-        ax.set_title(title, fontsize=title_size, fontweight="normal", pad=8)
+        plot_center_cm = left_cm + plot_area_width_cm / 2
+        fig.text(
+            plot_center_cm / figure_width_cm,
+            1 - (0.08 / figure_height_cm),
+            title,
+            ha="center",
+            va="top",
+            fontsize=title_size,
+        )
 
-    # -------------------------------------------------------------------------
-    # Create a vector legend independently of the scatter collection.
-    # -------------------------------------------------------------------------
+    # Create one vector legend shared by all panels.
     if show_legend:
         if legend_title is None:
             legend_title = group_col
@@ -782,25 +920,25 @@ def plot_anndata_group_umap(
                 )
             )
 
-        legend_left_cm = left_cm + width_cm + right_cm + legend_gap_cm
-        legend_x = legend_left_cm / figure_width_cm
+        legend_left_cm = (
+            left_cm + plot_area_width_cm + right_cm + legend_gap_cm
+        )
         fig.legend(
             handles=legend_handles,
             title=legend_title,
             frameon=False,
             loc="center left",
-            bbox_to_anchor=(legend_x, 0.5),
+            bbox_to_anchor=(legend_left_cm / figure_width_cm, 0.5),
             bbox_transform=fig.transFigure,
             borderaxespad=0,
             fontsize=legend_fontsize,
             title_fontsize=legend_title_size,
             ncol=legend_ncol,
-            columnspacing=1.2,
-            handletextpad=0.5,
+            columnspacing=legend_columnspacing,
+            handletextpad=legend_handletextpad,
         )
 
-    # Save only when the caller explicitly supplies an output path.
     if save is not None:
         fig.savefig(save, dpi=dpi, transparent=transparent)
 
-    return fig, ax
+    return fig, axes_array
