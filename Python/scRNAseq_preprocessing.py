@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 if TYPE_CHECKING:
     from anndata import AnnData
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "convert_genes_to_features",
+    "ordmag_filter",
     "read_one_gsm",
     "trim_axs",
 ]
@@ -254,6 +256,96 @@ def convert_genes_to_features(
     print(f"\nDone.\nConverted: {len(converted)}\nSkipped:   {len(skipped)}")
 
     return converted
+
+
+# =============================================================================
+# Quality control and cell calling
+# =============================================================================
+
+
+def ordmag_filter(
+    adata: AnnData,
+    expect_cells: int = 8000,
+) -> tuple[np.ndarray, float, np.ndarray]:
+    """Call cells using an approximate Cell Ranger OrdMag Step 1 filter.
+
+    The function ranks barcodes by their total UMI counts, calculates the 99th
+    percentile among the highest-ranked ``expect_cells`` barcodes, and retains
+    barcodes with total counts of at least one tenth of that value.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing the raw UMI count matrix in ``adata.X``.
+        Rows must represent barcodes or cells and columns must represent genes.
+        Both dense arrays and SciPy sparse matrices are supported.
+    expect_cells : int, default=8000
+        Approximate number of expected cells. The calculation uses the smaller
+        of this value and the number of available barcodes. Must be a positive
+        integer; Boolean values are not accepted.
+
+    Returns
+    -------
+    keep : numpy.ndarray
+        One-dimensional Boolean array with one value per barcode. ``True``
+        identifies a barcode whose total UMI count meets the OrdMag cutoff.
+    threshold : float
+        OrdMag UMI cutoff, calculated as one tenth of the 99th percentile of
+        the top-ranked barcodes.
+    total_umi : numpy.ndarray
+        One-dimensional array containing the total UMI count for every barcode
+        in the original row order.
+
+    Raises
+    ------
+    TypeError
+        If ``expect_cells`` is not an integer.
+    ValueError
+        If ``expect_cells`` is not positive or ``adata.X`` has no barcode rows.
+    AttributeError
+        If ``adata`` does not provide an ``X`` count matrix.
+
+    Examples
+    --------
+    >>> keep, threshold, total_umi = ordmag_filter(adata, expect_cells=8000)
+    >>> filtered_adata = adata[keep].copy()
+
+    Notes
+    -----
+    This is an approximation of Cell Ranger's OrdMag Step 1 procedure. It does
+    not perform EmptyDrops-style testing or other later cell-calling steps.
+    """
+    if isinstance(expect_cells, bool) or not isinstance(expect_cells, Integral):
+        raise TypeError("expect_cells must be an integer")
+
+    if expect_cells <= 0:
+        raise ValueError("expect_cells must be greater than zero")
+
+    # Sum raw UMI counts across genes while supporting both sparse and dense X.
+    if sparse.issparse(adata.X):
+        total_umi = np.asarray(adata.X.sum(axis=1)).ravel()
+    else:
+        total_umi = np.asarray(adata.X.sum(axis=1)).ravel()
+
+    if total_umi.size == 0:
+        raise ValueError("adata.X must contain at least one barcode row")
+
+    # Rank totals without changing the order of values returned to the caller.
+    ranked = np.sort(total_umi)[::-1]
+    n_barcodes = min(expect_cells, len(ranked))
+    top_n = ranked[:n_barcodes]
+
+    # Cell Ranger's OrdMag heuristic uses one tenth of a robust upper count.
+    robust_maximum = float(np.percentile(top_n, 99))
+    threshold = robust_maximum / 10
+    keep = total_umi >= threshold
+
+    print(f"Expected cells: {expect_cells:,}")
+    print(f"99th percentile m: {robust_maximum:,.1f} UMIs")
+    print(f"OrdMag cutoff m/10: {threshold:,.1f} UMIs")
+    print(f"Called cells: {keep.sum():,}")
+
+    return keep, threshold, total_umi
 
 
 # =============================================================================

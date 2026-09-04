@@ -15,6 +15,8 @@ preprocessing pipelines. All project files are maintained under
 - Added `convert_genes_to_features()` for converting legacy two-column 10X gene
   files into modern three-column feature files.
 - Added `trim_axs()` for removing unused Matplotlib axes from plot grids.
+- Added `ordmag_filter()` for approximate Cell Ranger OrdMag Step 1 cell
+  calling from dense or SciPy sparse raw UMI matrices.
 - Added detailed NumPy-style docstrings covering each Python function's input
   parameters, output value, exceptions, side effects, and examples.
 - Initialized `R/scRNAseq_preprocessing.R` for future R functions, with Roxygen
@@ -36,3 +38,5 @@ preprocessing pipelines. All project files are maintained under
 - `1e54624` — Added the implementation plan.
 - `feat: initialize scRNA-seq preprocessing scripts` — Implementation commit
   containing this log entry.
+- `feat: add OrdMag cell-calling filter` — Added `ordmag_filter()` and its
+  complete input/output documentation.
