@@ -1317,6 +1317,8 @@ def plot_seurat_violins(
     xlabel: str = "Identity",
     show_legend: bool = True,
     legend_title: str | None = None,
+    legend_fontsize: float = 12,
+    legend_title_fontsize: float = 12,
     panel_width: float = 4.2,
     panel_height: float = 4.5,
     save: str | Path | None = None,
@@ -1378,8 +1380,8 @@ def plot_seurat_violins(
         Whether to compare ``order[0]`` and ``order[1]`` for every plotted gene
         and draw a significance bracket.
     test : str, default="mannwhitney"
-        Statistical test name. Currently only two-sided ``"mannwhitney"`` is
-        supported.
+        Statistical test name. ``"mannwhitney"``, ``"mann-whitney"``, and
+        ``"mw"`` select the same two-sided Mann–Whitney U test.
     adjust_p : bool, default=True
         Whether to apply Benjamini–Hochberg FDR adjustment across plotted genes.
         When ``False``, the unadjusted p-value is copied to the ``FDR`` column.
@@ -1402,6 +1404,10 @@ def plot_seurat_violins(
         Whether to add a shared figure-level group legend.
     legend_title : str, optional
         Shared legend title. No title is displayed when omitted.
+    legend_fontsize : float, default=12
+        Font size of shared legend entries in points.
+    legend_title_fontsize : float, default=12
+        Font size of the shared legend title in points.
     panel_width : float, default=4.2
         Width of each gene panel in inches.
     panel_height : float, default=4.5
@@ -1458,8 +1464,8 @@ def plot_seurat_violins(
     The statistical comparison treats cells as independent observations. It is
     suitable for exploratory visualization but does not account for biological
     replication or donor/sample structure and should not replace replicate-aware
-    pseudobulk or mixed-model differential-expression analysis. ``plt.show()``
-    is called before the results are returned.
+    pseudobulk or mixed-model differential-expression analysis. The function
+    does not call ``plt.show()``; display remains under caller control.
     """
     # -------------------------------------------------------------------------
     # Validate grouping, genes, expression source, and panel layout.
@@ -1507,11 +1513,17 @@ def plot_seurat_violins(
         group_order = list(order)
     group_order = [str(group) for group in group_order]
 
+    if not group_order:
+        raise ValueError("No groups were found.")
+
     if show_stats and len(group_order) < 2:
         raise ValueError("At least two groups are required for statistical testing.")
 
-    if show_stats and test.lower() != "mannwhitney":
-        raise ValueError(f"Unsupported test: {test}")
+    supported_tests = {"mannwhitney", "mann-whitney", "mw"}
+    if show_stats and test.lower() not in supported_tests:
+        raise ValueError(
+            f"Unsupported test: {test}. Currently supported: 'mannwhitney'."
+        )
 
     # Keep optional visualization/statistics dependencies local to this helper.
     import scanpy as sc
@@ -1580,10 +1592,14 @@ def plot_seurat_violins(
                     "Group2": group2,
                     "n_Group1": len(values1),
                     "n_Group2": len(values2),
-                    "mean_Group1": values1.mean(),
-                    "mean_Group2": values2.mean(),
-                    "median_Group1": values1.median(),
-                    "median_Group2": values2.median(),
+                    "mean_Group1": values1.mean() if len(values1) > 0 else np.nan,
+                    "mean_Group2": values2.mean() if len(values2) > 0 else np.nan,
+                    "median_Group1": (
+                        values1.median() if len(values1) > 0 else np.nan
+                    ),
+                    "median_Group2": (
+                        values2.median() if len(values2) > 0 else np.nan
+                    ),
                     "statistic": statistic,
                     "pvalue": pvalue,
                 }
@@ -1646,6 +1662,7 @@ def plot_seurat_violins(
             y="Expression",
             order=group_order,
             hue=groupby,
+            hue_order=group_order,
             palette=resolved_palette,
             legend=False,
             inner=None,
@@ -1781,8 +1798,6 @@ def plot_seurat_violins(
             transparent=transparent,
             facecolor="none" if transparent else "white",
         )
-
-    plt.show()
 
     if return_data:
         return stats_df, fig, axes_flat, expression_df

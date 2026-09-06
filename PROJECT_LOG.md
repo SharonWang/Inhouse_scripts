@@ -20,6 +20,18 @@ preprocessing pipelines. All project files are maintained under
 - Saved the supplied `WT`/`cKO` colours as the reusable exported
   `WT_CKO_COLORS` palette.
 
+### Changed
+
+- Updated `plot_seurat_violins()` to accept `mannwhitney`, `mann-whitney`, and
+  `mw` as aliases for the two-sided Mann–Whitney U test.
+- Added explicit empty-group-order validation, aligned violin hue order with the
+  requested group order, and avoided empty-series summary warnings.
+- Added the previously missing `legend_fontsize` and `legend_title_fontsize`
+  parameters with 12-point defaults, preventing undefined-name errors when a
+  shared legend is displayed.
+- Removed the automatic `plt.show()` call so callers control interactive display
+  and can compose or save the returned figure before showing it.
+
 ### Verification
 
 - Automated tests were not added or run, following the user's standing
@@ -31,6 +43,8 @@ preprocessing pipelines. All project files are maintained under
 
 - `feat: add Seurat-style AnnData violin plots` — Added the violin plotter,
   exploratory statistics, saved palette, and this log entry.
+- `fix: refine Seurat-style violin plotting` — Added test aliases, group-order
+  safeguards, working legend font controls, and caller-controlled display.
 
 ## 2026-09-06
 
