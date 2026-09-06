@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MaxNLocator, PercentFormatter
 from scipy import sparse
 
 if TYPE_CHECKING:
@@ -26,12 +26,26 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "MHCII_GROUP_COLORS",
     "convert_genes_to_features",
     "ordmag_filter",
+    "plot_adata_stacked_bar",
     "plot_anndata_group_umap",
     "read_one_gsm",
     "trim_axs",
 ]
+
+
+# =============================================================================
+# Reusable colour palettes
+# =============================================================================
+
+
+MHCII_GROUP_COLORS = {
+    "MHCIIhi": "#E7B2B6",
+    "MHCIIlo": "#B7C3E0",
+}
+"""Reusable colour mapping for high- and low-MHCII annotation groups."""
 
 
 # =============================================================================
@@ -945,3 +959,320 @@ def plot_anndata_group_umap(
         fig.savefig(save, dpi=dpi, transparent=transparent)
 
     return fig, axes_array
+
+
+def plot_adata_stacked_bar(
+    adata: AnnData,
+    x_col: str,
+    stack_col: str,
+    class_order: Iterable[Any] | None = None,
+    colors: dict[Any, Any] | None = None,
+    x_order: Iterable[Any] | None = None,
+    exclude: Iterable[Any] | None = None,
+    renormalize: bool = True,
+    width: float = 0.68,
+    figsize: tuple[float, float] = (4.8, 5.2),
+    ylabel: str = "Cell proportion (%)",
+    xlabel: str | None = None,
+    title: str | None = None,
+    legend_title: str | None = None,
+    show_labels: bool = True,
+    label_min_pct: float = 8,
+    label_fontsize: float = 10,
+    xtick_rotation: float = 0,
+    xtick_fontsize: float = 12,
+    ytick_fontsize: float = 11,
+    legend_fontsize: float = 11,
+    legend_title_fontsize: float = 11,
+    edgecolor: Any = "white",
+    linewidth: float = 1.2,
+    save: str | Path | None = None,
+    dpi: float = 600,
+    transparent: bool = True,
+    return_table: bool = True,
+) -> tuple[Figure, Axes, pd.DataFrame] | tuple[Figure, Axes]:
+    """Plot cell-composition percentages from AnnData metadata as stacked bars.
+
+    The function tabulates two columns from ``adata.obs`` without modifying the
+    AnnData object. Missing metadata rows are removed before percentages are
+    calculated. Excluded stack categories may be removed either before or after
+    normalization, depending on ``renormalize``.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing the grouping metadata in ``adata.obs``.
+    x_col : str
+        Observation column defining individual bars, for example ``"sample"``,
+        ``"Condition_FatType"``, or ``"Study"``.
+    stack_col : str
+        Observation column defining the categories stacked within each bar, for
+        example ``"MHCII_group"`` or ``"CellType_Broad"``.
+    class_order : iterable, optional
+        Stack-category order from the bottom to the top of each bar. Categories
+        absent from the data are retained as zero-height segments. By default,
+        the crosstab column order is used.
+    colors : dict, optional
+        Mapping from stack categories to Matplotlib-compatible colours. Missing
+        mappings are filled from ``tab20``. The supplied mapping is copied and
+        is therefore not modified. If omitted, all colours come from ``tab20``.
+    x_order : iterable, optional
+        Desired left-to-right order of bars. Requested values absent from the
+        percentage table are ignored. By default, crosstab index order is used.
+    exclude : iterable, optional
+        Stack categories to omit, such as ``["Ambiguous"]``.
+    renormalize : bool, default=True
+        If ``True``, excluded cells are removed before calculating percentages,
+        so each non-empty bar sums to 100%. If ``False``, percentages are first
+        calculated from all cells and excluded segments are then hidden, so a
+        displayed bar may sum to less than 100%.
+    width : float, default=0.68
+        Width of each bar in Matplotlib x-axis units.
+    figsize : tuple of float, default=(4.8, 5.2)
+        Figure width and height in inches.
+    ylabel : str, default="Cell proportion (%)"
+        Label displayed on the vertical axis.
+    xlabel : str, optional
+        Label displayed on the horizontal axis. No label is added when omitted.
+    title : str, optional
+        Plot title. No title is added when omitted.
+    legend_title : str, optional
+        Legend heading. Defaults to ``stack_col`` with underscores replaced by
+        spaces.
+    show_labels : bool, default=True
+        Whether sufficiently large bar segments display internal percentages.
+    label_min_pct : float, default=8
+        Minimum segment percentage required for an internal text label.
+    label_fontsize : float, default=10
+        Font size of internal percentage labels in points.
+    xtick_rotation : float, default=0
+        Rotation of horizontal-axis labels in degrees. Rotated labels are
+        right-aligned; unrotated labels are centred.
+    xtick_fontsize : float, default=12
+        Font size of horizontal-axis tick labels in points.
+    ytick_fontsize : float, default=11
+        Font size of vertical-axis tick labels in points.
+    legend_fontsize : float, default=11
+        Font size of legend entries in points.
+    legend_title_fontsize : float, default=11
+        Font size of the legend title in points.
+    edgecolor : color, default="white"
+        Matplotlib-compatible colour used for segment borders.
+    linewidth : float, default=1.2
+        Width of segment borders in points.
+    save : str or pathlib.Path, optional
+        Output filename passed to ``Figure.savefig``. Nothing is written when
+        omitted.
+    dpi : float, default=600
+        Resolution used when saving the figure.
+    transparent : bool, default=True
+        Whether a saved figure uses a transparent background.
+    return_table : bool, default=True
+        Whether to return the percentage table together with the figure and
+        axes.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figure containing the stacked percentage bar plot.
+    ax : matplotlib.axes.Axes
+        Axes containing the stacked bars and legend.
+    pct_df : pandas.DataFrame
+        Percentage table with bars as rows and stack categories as columns.
+        Returned only when ``return_table=True``.
+
+    Raises
+    ------
+    ValueError
+        If ``x_col`` or ``stack_col`` is absent from ``adata.obs``, or if no
+        complete observations remain after removing missing and excluded data.
+
+    Examples
+    --------
+    >>> fig, ax, percentages = plot_adata_stacked_bar(
+    ...     adata,
+    ...     x_col="sample",
+    ...     stack_col="MHCII_group",
+    ...     colors=MHCII_GROUP_COLORS,
+    ...     exclude=["Ambiguous"],
+    ... )
+
+    Notes
+    -----
+    ``plt.show()`` is called before returning. The source AnnData object and a
+    caller-supplied ``colors`` mapping are not modified.
+    """
+    # -------------------------------------------------------------------------
+    # Validate and copy the required observation metadata.
+    # -------------------------------------------------------------------------
+    for column in (x_col, stack_col):
+        if column not in adata.obs.columns:
+            raise ValueError(
+                f"'{column}' not found in adata.obs. "
+                f"Available columns: {list(adata.obs.columns)}"
+            )
+
+    metadata = adata.obs[[x_col, stack_col]].copy()
+    metadata = metadata.dropna(subset=[x_col, stack_col])
+    metadata[x_col] = metadata[x_col].astype(str)
+    metadata[stack_col] = metadata[stack_col].astype(str)
+
+    if metadata.empty:
+        raise ValueError(
+            f"No complete observations remain for '{x_col}' and '{stack_col}'."
+        )
+
+    excluded_classes = [] if exclude is None else [str(x) for x in exclude]
+
+    # -------------------------------------------------------------------------
+    # Calculate percentages before or after category exclusion as requested.
+    # -------------------------------------------------------------------------
+    if renormalize:
+        if excluded_classes:
+            metadata = metadata[~metadata[stack_col].isin(excluded_classes)]
+        if metadata.empty:
+            raise ValueError("No observations remain after excluding categories.")
+        pct_df = pd.crosstab(
+            metadata[x_col], metadata[stack_col], normalize="index"
+        ) * 100
+    else:
+        pct_df = pd.crosstab(
+            metadata[x_col], metadata[stack_col], normalize="index"
+        ) * 100
+        if excluded_classes:
+            pct_df = pct_df.drop(columns=excluded_classes, errors="ignore")
+
+    # Use explicit stack and x-axis orderings when the caller supplies them.
+    if class_order is None:
+        ordered_classes = list(pct_df.columns)
+    else:
+        ordered_classes = [str(category) for category in class_order]
+    pct_df = pct_df.reindex(columns=ordered_classes, fill_value=0)
+
+    if x_order is not None:
+        requested_x_order = [str(value) for value in x_order]
+        existing_x_order = [
+            value for value in requested_x_order if value in pct_df.index
+        ]
+        pct_df = pct_df.reindex(existing_x_order)
+
+    if pct_df.empty:
+        raise ValueError("No bars remain after applying the requested ordering.")
+
+    # -------------------------------------------------------------------------
+    # Resolve a complete colour mapping without mutating caller-owned input.
+    # -------------------------------------------------------------------------
+    if colors is None:
+        cmap = plt.get_cmap("tab20")
+        resolved_colors = {
+            category: cmap(i % 20)
+            for i, category in enumerate(ordered_classes)
+        }
+    else:
+        resolved_colors = dict(colors)
+        missing_colors = [
+            category
+            for category in ordered_classes
+            if category not in resolved_colors
+        ]
+        cmap = plt.get_cmap("tab20")
+        for i, category in enumerate(missing_colors):
+            resolved_colors[category] = cmap(i % 20)
+
+    # -------------------------------------------------------------------------
+    # Draw each category from the bottom to the top of every stacked bar.
+    # -------------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=figsize)
+    x_positions = np.arange(len(pct_df))
+    bottom = np.zeros(len(pct_df))
+
+    for state in ordered_classes:
+        values = pct_df[state].to_numpy(dtype=float)
+        ax.bar(
+            x_positions,
+            values,
+            bottom=bottom,
+            width=width,
+            color=resolved_colors[state],
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            label=str(state).replace("_", "-"),
+        )
+
+        if show_labels:
+            for bar_i, value in enumerate(values):
+                if value >= label_min_pct:
+                    ax.text(
+                        x_positions[bar_i],
+                        bottom[bar_i] + value / 2,
+                        f"{value:.1f}%",
+                        ha="center",
+                        va="center",
+                        fontsize=label_fontsize,
+                        fontweight="bold",
+                        color="black",
+                    )
+
+        bottom += values
+
+    # -------------------------------------------------------------------------
+    # Format axes, title, and the external legend.
+    # -------------------------------------------------------------------------
+    ax.set_xticks(x_positions)
+    tick_alignment = "right" if xtick_rotation != 0 else "center"
+    ax.set_xticklabels(
+        pct_df.index.astype(str),
+        fontsize=xtick_fontsize,
+        fontweight="bold",
+        rotation=xtick_rotation,
+        ha=tick_alignment,
+    )
+    ax.tick_params(axis="x", length=0)
+    ax.set_ylabel(ylabel, fontsize=13, fontweight="bold")
+
+    if xlabel is not None:
+        ax.set_xlabel(xlabel, fontsize=13, fontweight="bold")
+
+    ax.set_ylim(0, 100)
+    ax.set_yticks(np.arange(0, 101, 20))
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+    ax.tick_params(axis="y", labelsize=ytick_fontsize, width=1, length=4)
+
+    if title is not None:
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
+    ax.grid(False)
+
+    if legend_title is None:
+        legend_title = stack_col.replace("_", " ")
+
+    legend = ax.legend(
+        title=legend_title,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        frameon=False,
+        fontsize=legend_fontsize,
+        title_fontsize=legend_title_fontsize,
+        handlelength=1.2,
+        labelspacing=0.7,
+    )
+    legend.get_title().set_fontweight("bold")
+    plt.tight_layout()
+
+    if save is not None:
+        fig.savefig(
+            save,
+            dpi=dpi,
+            bbox_inches="tight",
+            transparent=transparent,
+        )
+
+    plt.show()
+
+    if return_table:
+        return fig, ax, pct_df
+    return fig, ax

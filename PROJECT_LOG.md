@@ -4,6 +4,35 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-09-06
+
+### Added
+
+- Added `plot_adata_stacked_bar()` to the Python visualization section for
+  stacked cell-composition percentages calculated from AnnData metadata.
+- Documented and preserved both exclusion modes: renormalizing after excluded
+  cells are removed, or hiding excluded segments after percentages are based on
+  all complete observations.
+- Added configurable category and bar ordering, colours, internal percentage
+  labels, plot styling, output saving, and optional percentage-table return.
+- Saved the supplied `MHCIIhi`/`MHCIIlo` colour mapping as the reusable exported
+  `MHCII_GROUP_COLORS` palette.
+- Kept visualization separate from filtering by operating on a metadata copy;
+  caller-supplied colour mappings are also copied before missing colours are
+  filled.
+
+### Verification
+
+- Automated tests were not added or run, following the user's standing
+  instruction.
+- Reviewed function organization, input/output documentation, and the Git diff
+  before committing.
+
+### Commit
+
+- `feat: add AnnData composition stacked bar plot` — Added the composition
+  plotter and this log entry.
+
 ## 2026-09-05
 
 ### Added
