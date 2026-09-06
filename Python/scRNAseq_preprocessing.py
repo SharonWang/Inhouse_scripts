@@ -7,6 +7,7 @@ complete docstring describing their inputs, outputs, side effects, and errors.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from numbers import Integral
 from pathlib import Path
@@ -27,10 +28,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MHCII_GROUP_COLORS",
+    "WT_CKO_COLORS",
     "convert_genes_to_features",
     "ordmag_filter",
     "plot_adata_stacked_bar",
     "plot_anndata_group_umap",
+    "plot_seurat_violins",
     "read_one_gsm",
     "trim_axs",
 ]
@@ -46,6 +49,13 @@ MHCII_GROUP_COLORS = {
     "MHCIIlo": "#B7C3E0",
 }
 """Reusable colour mapping for high- and low-MHCII annotation groups."""
+
+
+WT_CKO_COLORS = {
+    "WT": "#DCE8F2",
+    "cKO": "#F3C77F",
+}
+"""Reusable colour mapping for wild-type and conditional-knockout groups."""
 
 
 # =============================================================================
@@ -1276,3 +1286,504 @@ def plot_adata_stacked_bar(
     if return_table:
         return fig, ax, pct_df
     return fig, ax
+
+
+def plot_seurat_violins(
+    adata: AnnData,
+    genes: str | Iterable[str],
+    groupby: str,
+    order: Iterable[Any] | None = None,
+    palette: dict[Any, Any] | None = None,
+    layer: str | None = None,
+    use_raw: bool = False,
+    ncols: int = 3,
+    show_points: bool = True,
+    point_size: float = 1.6,
+    point_alpha: float = 0.65,
+    point_marker: str = "D",
+    point_color: Any = "black",
+    jitter: float = 0.28,
+    show_box: bool = True,
+    box_width: float = 0.12,
+    show_stats: bool = True,
+    test: str = "mannwhitney",
+    adjust_p: bool = True,
+    show_pvalue: bool = False,
+    violin_linewidth: float = 1.0,
+    title_fontsize: float = 17,
+    axis_label_fontsize: float = 14,
+    tick_fontsize: float = 14,
+    ylabel: str = "Expression Level",
+    xlabel: str = "Identity",
+    show_legend: bool = True,
+    legend_title: str | None = None,
+    panel_width: float = 4.2,
+    panel_height: float = 4.5,
+    save: str | Path | None = None,
+    dpi: float = 300,
+    transparent: bool = False,
+    return_data: bool = False,
+) -> (
+    tuple[pd.DataFrame, Figure, np.ndarray]
+    | tuple[pd.DataFrame, Figure, np.ndarray, pd.DataFrame]
+):
+    """Draw Seurat-style gene-expression violin plots from an AnnData object.
+
+    Each gene panel combines a violin, optional individual-cell points, an
+    optional central box plot, and an optional comparison between the first two
+    groups in ``order``. Mann–Whitney p-values can be adjusted across all genes
+    with the Benjamini–Hochberg false-discovery-rate procedure.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing expression values and grouping metadata.
+    genes : str or iterable of str
+        One gene or an ordered collection of genes to plot. Genes unavailable
+        from the selected expression source are reported and skipped.
+    groupby : str
+        Column in ``adata.obs`` used to group cells along the horizontal axis.
+    order : iterable, optional
+        Group order for plotting. When statistics are enabled, only the first
+        two groups are compared. By default, categorical order is preserved;
+        otherwise first-observed order is used.
+    palette : dict, optional
+        Mapping from group labels to Matplotlib-compatible colours. Missing
+        mappings are filled from Seaborn ``Set2``. The supplied mapping is
+        copied and is not modified.
+    layer : str, optional
+        AnnData layer passed to :func:`scanpy.get.obs_df`. By default,
+        expression is read from ``adata.X`` unless ``use_raw=True``.
+    use_raw : bool, default=False
+        Whether to obtain expression from ``adata.raw``.
+    ncols : int, default=3
+        Maximum number of gene panels per figure row. Must be positive.
+    show_points : bool, default=True
+        Whether to overlay individual-cell points.
+    point_size : float, default=1.6
+        Size of individual-cell markers in Seaborn units.
+    point_alpha : float, default=0.65
+        Opacity of individual-cell markers.
+    point_marker : str, default="D"
+        Matplotlib marker code used for individual cells.
+    point_color : color, default="black"
+        Matplotlib-compatible colour used for individual-cell markers.
+    jitter : float, default=0.28
+        Horizontal jitter applied to individual-cell markers.
+    show_box : bool, default=True
+        Whether to overlay a white box plot with whiskers and median.
+    box_width : float, default=0.12
+        Width of the central box plot in categorical-axis units.
+    show_stats : bool, default=True
+        Whether to compare ``order[0]`` and ``order[1]`` for every plotted gene
+        and draw a significance bracket.
+    test : str, default="mannwhitney"
+        Statistical test name. Currently only two-sided ``"mannwhitney"`` is
+        supported.
+    adjust_p : bool, default=True
+        Whether to apply Benjamini–Hochberg FDR adjustment across plotted genes.
+        When ``False``, the unadjusted p-value is copied to the ``FDR`` column.
+    show_pvalue : bool, default=False
+        Whether brackets show numeric ``P``/``FDR`` values instead of
+        significance symbols.
+    violin_linewidth : float, default=1.0
+        Width of violin boundary lines.
+    title_fontsize : float, default=17
+        Font size of gene titles in points.
+    axis_label_fontsize : float, default=14
+        Font size of horizontal and vertical axis labels in points.
+    tick_fontsize : float, default=14
+        Font size of axis tick labels in points.
+    ylabel : str, default="Expression Level"
+        Vertical-axis label shown on the left-most panel of each row.
+    xlabel : str, default="Identity"
+        Horizontal-axis label shown on every used panel.
+    show_legend : bool, default=True
+        Whether to add a shared figure-level group legend.
+    legend_title : str, optional
+        Shared legend title. No title is displayed when omitted.
+    panel_width : float, default=4.2
+        Width of each gene panel in inches.
+    panel_height : float, default=4.5
+        Height of each gene panel in inches.
+    save : str or pathlib.Path, optional
+        Output filename passed to ``Figure.savefig``. Nothing is written when
+        omitted.
+    dpi : float, default=300
+        Resolution used when saving the figure.
+    transparent : bool, default=False
+        Whether a saved figure uses a transparent background.
+    return_data : bool, default=False
+        Whether to append the extracted long-form expression table to the
+        returned values.
+
+    Returns
+    -------
+    stats_df : pandas.DataFrame
+        One row per plotted gene with compared groups, cell counts, means,
+        medians, Mann–Whitney statistic, raw p-value, and FDR. Empty when
+        ``show_stats=False``.
+    fig : matplotlib.figure.Figure
+        Figure containing the gene-expression panels and optional shared legend.
+    axes : numpy.ndarray
+        Flattened object array containing all allocated axes. Unused axes are
+        hidden when the panel grid is larger than the number of genes.
+    expression_df : pandas.DataFrame
+        Extracted expression values and ordered group labels. Returned only when
+        ``return_data=True``.
+
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is unavailable, no genes are supplied or found, raw data
+        are requested but absent, fewer than two groups are available for
+        enabled statistics, ``ncols`` is invalid, no selected-group cells remain,
+        or ``test`` is unsupported.
+    ImportError
+        If Scanpy, Seaborn, SciPy statistics, or statsmodels is unavailable in
+        the active Python environment.
+
+    Examples
+    --------
+    >>> stats, fig, axes = plot_seurat_violins(
+    ...     adata,
+    ...     genes=["Gata3", "Il5"],
+    ...     groupby="genotype",
+    ...     order=["WT", "cKO"],
+    ...     palette=WT_CKO_COLORS,
+    ... )
+
+    Notes
+    -----
+    The statistical comparison treats cells as independent observations. It is
+    suitable for exploratory visualization but does not account for biological
+    replication or donor/sample structure and should not replace replicate-aware
+    pseudobulk or mixed-model differential-expression analysis. ``plt.show()``
+    is called before the results are returned.
+    """
+    # -------------------------------------------------------------------------
+    # Validate grouping, genes, expression source, and panel layout.
+    # -------------------------------------------------------------------------
+    if groupby not in adata.obs.columns:
+        raise ValueError(
+            f"'{groupby}' is not present in adata.obs. "
+            f"Available columns: {list(adata.obs.columns)}"
+        )
+
+    requested_genes = [genes] if isinstance(genes, str) else list(genes)
+    if not requested_genes:
+        raise ValueError("No genes were provided.")
+
+    if isinstance(ncols, bool) or not isinstance(ncols, Integral) or ncols <= 0:
+        raise ValueError("ncols must be a positive integer")
+
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("use_raw=True but adata.raw is None.")
+        available_genes = set(adata.raw.var_names.astype(str))
+    else:
+        available_genes = set(adata.var_names.astype(str))
+
+    missing_genes = [
+        gene for gene in requested_genes if gene not in available_genes
+    ]
+    if missing_genes:
+        print("Warning: the following genes were not found and will be skipped:")
+        print(missing_genes)
+
+    selected_genes = [
+        gene for gene in requested_genes if gene in available_genes
+    ]
+    if not selected_genes:
+        raise ValueError("None of the requested genes were found.")
+
+    # Preserve categorical order unless the caller provides an explicit order.
+    if order is None:
+        if isinstance(adata.obs[groupby].dtype, pd.CategoricalDtype):
+            group_order = list(adata.obs[groupby].cat.categories)
+        else:
+            group_order = list(pd.unique(adata.obs[groupby].dropna()))
+    else:
+        group_order = list(order)
+    group_order = [str(group) for group in group_order]
+
+    if show_stats and len(group_order) < 2:
+        raise ValueError("At least two groups are required for statistical testing.")
+
+    if show_stats and test.lower() != "mannwhitney":
+        raise ValueError(f"Unsupported test: {test}")
+
+    # Keep optional visualization/statistics dependencies local to this helper.
+    import scanpy as sc
+    import seaborn as sns
+    from matplotlib.patches import Patch
+    from scipy.stats import mannwhitneyu
+    from statsmodels.stats.multitest import multipletests
+
+    # Resolve colours without mutating a palette owned by the caller.
+    if palette is None:
+        default_colors = sns.color_palette("Set2", n_colors=len(group_order))
+        resolved_palette = dict(zip(group_order, default_colors))
+    else:
+        resolved_palette = {str(key): value for key, value in palette.items()}
+        missing_colors = [
+            group for group in group_order if group not in resolved_palette
+        ]
+        extra_colors = sns.color_palette("Set2", n_colors=len(missing_colors))
+        resolved_palette.update(zip(missing_colors, extra_colors))
+
+    expression_df = sc.get.obs_df(
+        adata,
+        keys=[groupby] + selected_genes,
+        layer=layer,
+        use_raw=use_raw,
+    )
+    expression_df[groupby] = expression_df[groupby].astype(str)
+    expression_df = expression_df[
+        expression_df[groupby].isin(group_order)
+    ].copy()
+
+    if expression_df.empty:
+        raise ValueError("No cells remain after applying the requested group order.")
+
+    expression_df[groupby] = pd.Categorical(
+        expression_df[groupby], categories=group_order, ordered=True
+    )
+
+    # -------------------------------------------------------------------------
+    # Compare the first two ordered groups for every selected gene.
+    # -------------------------------------------------------------------------
+    stat_results: list[dict[str, Any]] = []
+    if show_stats:
+        group1, group2 = group_order[:2]
+
+        for gene in selected_genes:
+            values1 = expression_df.loc[
+                expression_df[groupby] == group1, gene
+            ].dropna()
+            values2 = expression_df.loc[
+                expression_df[groupby] == group2, gene
+            ].dropna()
+
+            if len(values1) > 0 and len(values2) > 0:
+                result = mannwhitneyu(values1, values2, alternative="two-sided")
+                pvalue = result.pvalue
+                statistic = result.statistic
+            else:
+                pvalue = np.nan
+                statistic = np.nan
+
+            stat_results.append(
+                {
+                    "Gene": gene,
+                    "Group1": group1,
+                    "Group2": group2,
+                    "n_Group1": len(values1),
+                    "n_Group2": len(values2),
+                    "mean_Group1": values1.mean(),
+                    "mean_Group2": values2.mean(),
+                    "median_Group1": values1.median(),
+                    "median_Group2": values2.median(),
+                    "statistic": statistic,
+                    "pvalue": pvalue,
+                }
+            )
+
+        stats_df = pd.DataFrame(stat_results)
+        stats_df["FDR"] = np.nan
+        valid_pvalues = stats_df["pvalue"].notna()
+        if valid_pvalues.any():
+            if adjust_p:
+                stats_df.loc[valid_pvalues, "FDR"] = multipletests(
+                    stats_df.loc[valid_pvalues, "pvalue"], method="fdr_bh"
+                )[1]
+            else:
+                stats_df.loc[valid_pvalues, "FDR"] = stats_df.loc[
+                    valid_pvalues, "pvalue"
+                ]
+    else:
+        stats_df = pd.DataFrame()
+
+    def _pvalue_label(pvalue: float) -> str:
+        """Format one raw or adjusted p-value for a plot annotation."""
+        if pd.isna(pvalue):
+            return "NA"
+        if show_pvalue:
+            label = "FDR" if adjust_p else "P"
+            return f"{label} = {pvalue:.2g}"
+        if pvalue < 0.0001:
+            return "****"
+        if pvalue < 0.001:
+            return "***"
+        if pvalue < 0.01:
+            return "**"
+        if pvalue < 0.05:
+            return "*"
+        return "ns"
+
+    # -------------------------------------------------------------------------
+    # Create the panel grid and render each selected gene.
+    # -------------------------------------------------------------------------
+    ncols_use = min(ncols, len(selected_genes))
+    nrows = math.ceil(len(selected_genes) / ncols_use)
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols_use,
+        figsize=(panel_width * ncols_use, panel_height * nrows),
+        squeeze=False,
+    )
+    axes_flat = axes.flatten()
+
+    for gene_i, gene in enumerate(selected_genes):
+        ax = axes_flat[gene_i]
+        gene_df = expression_df[[groupby, gene]].copy()
+        gene_df.columns = [groupby, "Expression"]
+        gene_df = gene_df.dropna()
+
+        sns.violinplot(
+            data=gene_df,
+            x=groupby,
+            y="Expression",
+            order=group_order,
+            hue=groupby,
+            palette=resolved_palette,
+            legend=False,
+            inner=None,
+            cut=0,
+            linewidth=violin_linewidth,
+            saturation=1,
+            ax=ax,
+        )
+
+        if show_points:
+            sns.stripplot(
+                data=gene_df,
+                x=groupby,
+                y="Expression",
+                order=group_order,
+                color=point_color,
+                marker=point_marker,
+                size=point_size,
+                alpha=point_alpha,
+                jitter=jitter,
+                ax=ax,
+                zorder=2,
+            )
+
+        if show_box:
+            sns.boxplot(
+                data=gene_df,
+                x=groupby,
+                y="Expression",
+                order=group_order,
+                width=box_width,
+                showfliers=False,
+                showcaps=True,
+                boxprops={
+                    "facecolor": "white",
+                    "edgecolor": "black",
+                    "linewidth": 1.2,
+                    "zorder": 3,
+                },
+                whiskerprops={"color": "black", "linewidth": 1.2},
+                capprops={"color": "black", "linewidth": 1.2},
+                medianprops={"color": "black", "linewidth": 1.8},
+                ax=ax,
+                zorder=3,
+            )
+
+        ymin = gene_df["Expression"].min()
+        ymax = gene_df["Expression"].max()
+        yrange = ymax - ymin
+        if not np.isfinite(yrange) or yrange == 0:
+            yrange = 1
+
+        if show_stats:
+            adjusted_pvalue = stats_df.loc[
+                stats_df["Gene"] == gene, "FDR"
+            ].iloc[0]
+            bracket_y = ymax + 0.07 * yrange
+            bracket_height = 0.035 * yrange
+            ax.plot(
+                [0, 0, 1, 1],
+                [
+                    bracket_y,
+                    bracket_y + bracket_height,
+                    bracket_y + bracket_height,
+                    bracket_y,
+                ],
+                color="black",
+                linewidth=1.2,
+                clip_on=False,
+            )
+            ax.text(
+                0.5,
+                bracket_y + bracket_height,
+                _pvalue_label(adjusted_pvalue),
+                ha="center",
+                va="bottom",
+                fontsize=11,
+            )
+            upper_margin = 0.22
+        else:
+            upper_margin = 0.08
+
+        ax.set_ylim(ymin - 0.03 * yrange, ymax + upper_margin * yrange)
+        ax.set_title(gene, fontsize=title_fontsize, pad=14)
+        ax.set_xlabel(xlabel, fontsize=axis_label_fontsize)
+        if gene_i % ncols_use == 0:
+            ax.set_ylabel(ylabel, fontsize=axis_label_fontsize)
+        else:
+            ax.set_ylabel("")
+        ax.tick_params(axis="both", labelsize=tick_fontsize, width=1)
+        ax.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_linewidth(1.1)
+        ax.spines["bottom"].set_linewidth(1.1)
+
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
+
+    # Hide surplus axes while retaining them in the returned flattened array.
+    for unused_i in range(len(selected_genes), len(axes_flat)):
+        axes_flat[unused_i].set_visible(False)
+
+    if show_legend:
+        handles = [
+            Patch(
+                facecolor=resolved_palette[group],
+                edgecolor="black",
+                label=group,
+            )
+            for group in group_order
+        ]
+        legend = fig.legend(
+            handles=handles,
+            title=legend_title,
+            loc="center right",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+            fontsize=legend_fontsize,
+            title_fontsize=legend_title_fontsize,
+        )
+        if legend_title is not None:
+            legend.get_title().set_fontweight("bold")
+        fig.tight_layout(rect=[0, 0, 0.94, 1])
+    else:
+        fig.tight_layout()
+
+    if save is not None:
+        fig.savefig(
+            save,
+            dpi=dpi,
+            bbox_inches="tight",
+            transparent=transparent,
+            facecolor="none" if transparent else "white",
+        )
+
+    plt.show()
+
+    if return_data:
+        return stats_df, fig, axes_flat, expression_df
+    return stats_df, fig, axes_flat

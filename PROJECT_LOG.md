@@ -4,6 +4,34 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-09-07
+
+### Added
+
+- Added `plot_seurat_violins()` to the Python visualization section for
+  multi-gene, grouped AnnData expression plots combining violins, individual
+  cells, central box plots, and optional two-group significance brackets.
+- Added two-sided Mann–Whitney comparisons between the first two ordered groups
+  and optional Benjamini–Hochberg FDR correction across plotted genes.
+- Documented expression-source selection, gene and group ordering, panel layout,
+  plot layers, statistical output, saving, and optional expression-data return.
+- Documented that cell-level tests are exploratory and do not replace
+  replicate-aware pseudobulk or mixed-model differential-expression analysis.
+- Saved the supplied `WT`/`cKO` colours as the reusable exported
+  `WT_CKO_COLORS` palette.
+
+### Verification
+
+- Automated tests were not added or run, following the user's standing
+  instruction.
+- Reviewed function organization, statistical assumptions, input/output
+  documentation, and the Git diff before committing.
+
+### Commit
+
+- `feat: add Seurat-style AnnData violin plots` — Added the violin plotter,
+  exploratory statistics, saved palette, and this log entry.
+
 ## 2026-09-06
 
 ### Added
