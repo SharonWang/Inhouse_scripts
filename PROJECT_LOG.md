@@ -31,6 +31,11 @@ preprocessing pipelines. All project files are maintained under
   shared legend is displayed.
 - Removed the automatic `plt.show()` call so callers control interactive display
   and can compose or save the returned figure before showing it.
+- Added `gene_fontstyle="italic"` for configurable gene-title styling, rejected
+  simultaneous `use_raw=True` and `layer=...`, and hid panels safely when a gene
+  has no non-missing expression values in the selected cells.
+- Updated the reusable `WT_CKO_COLORS` palette to the newly supplied values:
+  `WT="#898C8B"` and `cKO="#9CB4CC"`.
 
 ### Verification
 
@@ -45,6 +50,9 @@ preprocessing pipelines. All project files are maintained under
   exploratory statistics, saved palette, and this log entry.
 - `fix: refine Seurat-style violin plotting` — Added test aliases, group-order
   safeguards, working legend font controls, and caller-controlled display.
+- `feat: refine violin titles and expression source` — Added italic gene titles,
+  expression-source validation, empty-panel handling, and the revised WT/cKO
+  palette.
 
 ## 2026-09-06
 

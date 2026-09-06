@@ -52,8 +52,8 @@ MHCII_GROUP_COLORS = {
 
 
 WT_CKO_COLORS = {
-    "WT": "#DCE8F2",
-    "cKO": "#F3C77F",
+    "WT": "#898C8B",
+    "cKO": "#9CB4CC",
 }
 """Reusable colour mapping for wild-type and conditional-knockout groups."""
 
@@ -1311,6 +1311,7 @@ def plot_seurat_violins(
     show_pvalue: bool = False,
     violin_linewidth: float = 1.0,
     title_fontsize: float = 17,
+    gene_fontstyle: str = "italic",
     axis_label_fontsize: float = 14,
     tick_fontsize: float = 14,
     ylabel: str = "Expression Level",
@@ -1392,6 +1393,8 @@ def plot_seurat_violins(
         Width of violin boundary lines.
     title_fontsize : float, default=17
         Font size of gene titles in points.
+    gene_fontstyle : str, default="italic"
+        Matplotlib font style applied to gene titles.
     axis_label_fontsize : float, default=14
         Font size of horizontal and vertical axis labels in points.
     tick_fontsize : float, default=14
@@ -1442,9 +1445,10 @@ def plot_seurat_violins(
     ------
     ValueError
         If ``groupby`` is unavailable, no genes are supplied or found, raw data
-        are requested but absent, fewer than two groups are available for
-        enabled statistics, ``ncols`` is invalid, no selected-group cells remain,
-        or ``test`` is unsupported.
+        are requested but absent, ``use_raw`` and ``layer`` are requested
+        together, fewer than two groups are available for enabled statistics,
+        ``ncols`` is invalid, no selected-group cells remain, or ``test`` is
+        unsupported.
     ImportError
         If Scanpy, Seaborn, SciPy statistics, or statsmodels is unavailable in
         the active Python environment.
@@ -1475,6 +1479,9 @@ def plot_seurat_violins(
             f"'{groupby}' is not present in adata.obs. "
             f"Available columns: {list(adata.obs.columns)}"
         )
+
+    if use_raw and layer is not None:
+        raise ValueError("Use either use_raw=True or layer=..., not both.")
 
     requested_genes = [genes] if isinstance(genes, str) else list(genes)
     if not requested_genes:
@@ -1656,6 +1663,10 @@ def plot_seurat_violins(
         gene_df.columns = [groupby, "Expression"]
         gene_df = gene_df.dropna()
 
+        if gene_df.empty:
+            ax.set_visible(False)
+            continue
+
         sns.violinplot(
             data=gene_df,
             x=groupby,
@@ -1746,7 +1757,12 @@ def plot_seurat_violins(
             upper_margin = 0.08
 
         ax.set_ylim(ymin - 0.03 * yrange, ymax + upper_margin * yrange)
-        ax.set_title(gene, fontsize=title_fontsize, pad=14)
+        ax.set_title(
+            gene,
+            fontsize=title_fontsize,
+            fontstyle=gene_fontstyle,
+            pad=14,
+        )
         ax.set_xlabel(xlabel, fontsize=axis_label_fontsize)
         if gene_i % ncols_use == 0:
             ax.set_ylabel(ylabel, fontsize=axis_label_fontsize)
