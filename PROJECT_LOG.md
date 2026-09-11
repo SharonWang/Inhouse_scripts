@@ -8,6 +8,14 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `plot_bulk_pca()` to the R visualization section for validated
+  sample-level PCA of bulk or replicate-aware pseudobulk featureCounts
+  projects.
+- Added the reusable 15-colour `BULK_PCA_MACARON_COLORS` R palette and used it
+  as the PCA function's default for ordered groups.
+- Documented filtering, TMM normalization, variable-gene selection, PCA axes,
+  colour and shape mappings, convex hulls, sample labels, saving, dependencies,
+  scientific scope, and every returned analysis object.
 - Added the internal `.prepare_pairwise_dat()` R helper to centralize metadata
   subsetting, complete-case handling, replicate summaries, covariate design,
   rank validation, and the explicit `group2 - group1` contrast.
@@ -20,6 +28,11 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Added count-integrity, metadata-order, subset, factor-order, palette, shape,
+  numeric-range, component-availability, and non-zero-variance safeguards to
+  the supplied PCA workflow.
+- Preserved the supplied function's optional figure saving and comprehensive
+  return structure while keeping the input project unchanged.
 - Captured pairwise metadata subset expressions together with their calling
   environments, preventing forwarded expressions from losing access to
   metadata columns or caller-defined values.
@@ -36,12 +49,16 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the PCA workflow, plot-layer ordering, reusable palette, complete
+  Roxygen interface, README example, and Git diff before committing.
 - Reviewed the shared design preparation, contrast direction, edgeR and
   limma-voom flows, returned objects, documentation, and Git diff before
   committing.
 
 ### Commit
 
+- `feat: add bulk RNA-seq PCA plotter` — Added the documented PCA utility,
+  reusable macaron palette, validation safeguards, and README guidance.
 - `feat: add pairwise edgeR and limma-voom workflows` — Added shared design
   preparation, two documented pairwise DE methods, validation safeguards, and
   README usage guidance.

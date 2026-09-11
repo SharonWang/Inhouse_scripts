@@ -277,10 +277,10 @@ and added to this table for future studies.
 
 Source: [`R/scRNAseq_preprocessing.R`](R/scRNAseq_preprocessing.R)
 
-The R pipeline currently contains one reusable import function. The file also
-contains structured sections for cell-level data loading, QC and filtering,
-normalization and feature selection, dimensionality reduction and clustering,
-and visualization and export.
+The R pipeline contains reusable bulk/pseudobulk import, validation,
+subsetting, differential-expression, and exploratory visualization utilities.
+The file also retains structured sections for future cell-level preprocessing
+functions supplied in R.
 
 ### Function summary
 
@@ -291,6 +291,7 @@ and visualization and export.
 | Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
 | Pairwise differential expression | `edgeR_pairwise()` | Runs comparison-specific filtering, TMM normalization, dispersion estimation, and an edgeR quasi-likelihood test. | Annotated results plus DGEList, fit, test, design, contrast, and sample details. |
 | Pairwise differential expression | `limma_voom_pairwise()` | Runs comparison-specific filtering, TMM normalization, voom weighting, and a limma empirical Bayes test. | Annotated results plus DGEList, voom data, fit, design, contrast, and sample details. |
+| Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
 
 ### `read_featurecounts_project(...)`
 
@@ -453,6 +454,59 @@ samples triggers a warning because inference is unreliable.
 Dependencies are edgeR for `edgeR_pairwise()` and edgeR plus limma for
 `limma_voom_pairwise()`. Robust limma empirical Bayes estimation may also use
 statmod through limma.
+
+### `plot_bulk_pca(...)`
+
+Creates an exploratory sample-level PCA from the raw bulk or pseudobulk counts
+in a featureCounts project. By default it uses the selected colour variable as
+the `edgeR::filterByExpr()` group, performs TMM normalization, calculates log2
+CPM, and fits PCA to the 5,000 most variable retained genes.
+
+```r
+pca_result <- plot_bulk_pca(
+  project,
+  color_by = "Genotype",
+  shape_by = "Batch",
+  subset = Tissue == "Lung",
+  color_order = c("WT", "cKO"),
+  hull = TRUE,
+  label_samples = TRUE,
+  save = "outputs/lung_pca.pdf"
+)
+
+pca_result$plot
+pca_result$variance_explained
+pca_result$pca_data
+```
+
+The colour and shape columns can be ordered explicitly and supplied with
+either named mappings or unnamed vectors in factor order. Convex hulls are
+drawn only for groups with at least three samples and three unique PCA
+positions. Labels require `ggrepel`; the default `SampleName` label falls back
+to count-matrix sample names when that metadata column is unavailable. PDF
+output uses Cairo, while other figure formats are saved at 300 dpi.
+
+The returned list retains the plot, complete `prcomp` fit, joined sample-score
+table, log2-CPM matrix, variable genes, gene variances, component variance
+percentages, filtered DGEList, original-row filter mask, and the exact colour
+and shape mappings. The input project is not modified.
+
+This PCA expects raw sample-level bulk or replicate-aware pseudobulk counts and
+at least three selected samples. It is an exploratory quality-control view,
+not a replacement for design-aware differential-expression analysis. Its
+required packages are edgeR and ggplot2, plus ggrepel only when sample labels
+are requested.
+
+### Reusable R palettes
+
+| Palette | Colours | Intended use |
+|---|---|---|
+| `BULK_PCA_MACARON_COLORS` | 15 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_pca()` and other bulk/pseudobulk visualizations. |
+
+The palette is stored as an unnamed character vector so a plotting function
+can assign colours consistently after applying the requested group order. Pass
+a named custom vector through `colors` when stable biological labels should
+always use the same colours across studies.
 
 When another R function is supplied, it will be added to the appropriate
 section in the R pipeline, documented with complete Roxygen comments for inputs

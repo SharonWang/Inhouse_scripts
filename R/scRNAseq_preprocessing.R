@@ -13,6 +13,41 @@ NULL
 
 
 # =============================================================================
+# Reusable palettes
+# =============================================================================
+
+
+#' Macaron colour palette for bulk RNA-seq visualizations
+#'
+#' A reusable vector of 15 muted pastel colours originally supplied with
+#' [plot_bulk_pca()]. Unnamed colours are intentional so plotting functions can
+#' assign them in the requested factor-level order.
+#'
+#' @return A character vector containing 15 hexadecimal colour values.
+#'
+#' @examples
+#' BULK_PCA_MACARON_COLORS
+#' BULK_PCA_MACARON_COLORS[seq_len(3)]
+BULK_PCA_MACARON_COLORS <- c(
+    "#E6A4A8", # strawberry pink
+    "#9DB7D5", # blueberry blue
+    "#A8C8A0", # pistachio green
+    "#E5C07B", # vanilla yellow
+    "#B8A1C8", # lavender
+    "#8FC7C3", # mint
+    "#D7A6C2", # raspberry
+    "#C7B299", # caramel
+    "#A9B8C6", # blue-grey
+    "#D8B4A0", # peach
+    "#A5C3D5", # sky blue
+    "#C3B6D8", # violet
+    "#D8C79F", # biscuit
+    "#9FBDB0", # sage
+    "#D2A7A0"  # dusty rose
+)
+
+
+# =============================================================================
 # Data loading and import
 # =============================================================================
 
@@ -1983,3 +2018,642 @@ limma_voom_pairwise <- function(
 # =============================================================================
 # Visualization and export
 # =============================================================================
+
+
+#' Plot a principal-component analysis of bulk or pseudobulk RNA-seq samples
+#'
+#' Prepare a validated featureCounts project for exploratory sample-level PCA,
+#' optionally filter low-expression genes with [edgeR::filterByExpr()], apply
+#' TMM library normalization, select the most variable log2-CPM genes, and
+#' create a publication-style `ggplot2` scatter plot. Optional shapes, convex
+#' hulls, sample labels, custom factor orders, palettes, and figure export are
+#' supported.
+#'
+#' @param dat A `featurecounts_project`-like named list containing `counts`, a
+#'   numeric gene-by-sample raw-count matrix, and `metadata`, a data frame whose
+#'   row names are identical to the count-matrix column names and order.
+#' @param color_by Character scalar. Metadata column used to colour samples and,
+#'   when `filter_genes = TRUE`, define biological groups for
+#'   [edgeR::filterByExpr()].
+#' @param shape_by `NULL` or a character scalar. Optional metadata column used
+#'   to map plotting symbols.
+#' @param subset An optional unquoted logical expression evaluated within
+#'   `dat$metadata`, for example `Tissue == "Lung" & Condition != "Control"`.
+#'   Missing results are treated as `FALSE`. The default retains every sample.
+#' @param n_variable_genes Positive integer. Maximum number of genes with the
+#'   largest variance in log2 CPM to use as PCA features.
+#' @param filter_genes Logical scalar. Whether to remove low-expression genes
+#'   using [edgeR::filterByExpr()] with `color_by` as its grouping factor.
+#' @param normalize Logical scalar. Whether to calculate TMM normalization
+#'   factors and use normalized library sizes for log2-CPM calculation.
+#' @param pc_x,pc_y Distinct positive integers identifying the principal
+#'   components to plot on the horizontal and vertical axes.
+#' @param point_size Positive numeric scalar controlling point size.
+#' @param point_alpha Numeric scalar between zero and one controlling point
+#'   transparency.
+#' @param hull Logical scalar. Whether to draw filled convex hulls around colour
+#'   groups having at least three samples and three unique coordinate pairs.
+#' @param hull_alpha Numeric scalar between zero and one controlling convex-hull
+#'   fill transparency.
+#' @param hull_linewidth Non-negative numeric scalar controlling convex-hull
+#'   border width.
+#' @param label_samples Logical scalar. Whether to label individual samples with
+#'   `ggrepel`; this option requires the `ggrepel` package.
+#' @param label_col Character scalar. Column in the assembled PCA data used for
+#'   labels. The default `"SampleName"` falls back to count-matrix sample names
+#'   when that metadata column is absent.
+#' @param color_order `NULL` or a unique character vector giving the desired
+#'   order of colour groups. Every observed group must be included.
+#' @param shape_order `NULL` or a unique character vector giving the desired
+#'   order of shape groups. Every observed group must be included.
+#' @param colors `NULL` or a character vector of colours. An unnamed vector is
+#'   assigned in `color_order`; a named vector must contain every observed
+#'   colour group. By default, `BULK_PCA_MACARON_COLORS` is used for up to 15
+#'   groups and `grDevices::hcl.colors(..., palette = "Pastel 1")` thereafter.
+#' @param shapes `NULL` or a vector of plotting symbols. An unnamed vector is
+#'   assigned in `shape_order`; a named vector must contain every observed shape
+#'   group. The default supports up to eight groups.
+#' @param title `NULL` or a character scalar used as the plot title.
+#' @param width,height Positive numeric scalars giving saved figure dimensions
+#'   in inches.
+#' @param save `NULL` or a character scalar giving an output figure path. PDF
+#'   files use `grDevices::cairo_pdf`; other formats are written at 300 dpi.
+#' @param verbose Logical scalar. Whether to print a concise PCA summary.
+#'
+#' @return A named list with the following elements:
+#'   \describe{
+#'     \item{plot}{The assembled `ggplot` object.}
+#'     \item{pca}{The fitted `prcomp` object.}
+#'     \item{pca_data}{Sample scores joined to aligned sample metadata.}
+#'     \item{logCPM}{The filtered gene-by-sample log2-CPM matrix.}
+#'     \item{variable_genes}{Gene identifiers used as PCA features.}
+#'     \item{gene_variance}{Named, decreasingly sorted log2-CPM variances for
+#'       all retained genes.}
+#'     \item{variance_explained}{Percentage of variance explained by each
+#'       available principal component.}
+#'     \item{dge}{The filtered and optionally TMM-normalized `DGEList`.}
+#'     \item{keep_genes}{Logical vector aligned to the original count rows,
+#'       identifying genes retained by expression filtering.}
+#'     \item{colors}{Named colour vector used in the plot.}
+#'     \item{shapes}{Named shape vector used in the plot, or `NULL`.}
+#'   }
+#'
+#' @details
+#' PCA is exploratory and sample-level: supplied counts must represent bulk
+#' libraries or replicate-aware pseudobulk profiles, not individual cells.
+#' The function does not modify `dat`. If `save` is supplied, the figure is
+#' written as a side effect. At least three selected samples and two retained
+#' genes are required.
+#'
+#' @examples
+#' \dontrun{
+#' pca_result <- plot_bulk_pca(
+#'     project,
+#'     color_by = "Genotype",
+#'     shape_by = "Batch",
+#'     subset = Tissue == "Lung",
+#'     color_order = c("WT", "cKO"),
+#'     hull = TRUE,
+#'     label_samples = TRUE,
+#'     save = "outputs/lung_pca.pdf"
+#' )
+#' pca_result$plot
+#' }
+#'
+#' @export
+plot_bulk_pca <- function(
+    dat,
+    color_by = "Sorting",
+    shape_by = NULL,
+    subset = NULL,
+    n_variable_genes = 5000,
+    filter_genes = TRUE,
+    normalize = TRUE,
+    pc_x = 1,
+    pc_y = 2,
+    point_size = 3.2,
+    point_alpha = 0.85,
+    hull = FALSE,
+    hull_alpha = 0.10,
+    hull_linewidth = 0.6,
+    label_samples = FALSE,
+    label_col = "SampleName",
+    color_order = NULL,
+    shape_order = NULL,
+    colors = NULL,
+    shapes = NULL,
+    title = NULL,
+    width = 6,
+    height = 5,
+    save = NULL,
+    verbose = TRUE
+) {
+    if (!requireNamespace("edgeR", quietly = TRUE)) {
+        stop("Package 'edgeR' is required.")
+    }
+    if (!requireNamespace("ggplot2", quietly = TRUE)) {
+        stop("Package 'ggplot2' is required.")
+    }
+    if (isTRUE(label_samples) &&
+        !requireNamespace("ggrepel", quietly = TRUE)) {
+        stop("Package 'ggrepel' is required when label_samples = TRUE.")
+    }
+
+    required <- c("counts", "metadata")
+    missing_required <- setdiff(required, names(dat))
+    if (length(missing_required) > 0L) {
+        stop("dat is missing: ", paste(missing_required, collapse = ", "))
+    }
+
+    counts <- dat$counts
+    meta <- dat$metadata
+    if (!is.matrix(counts) || !is.numeric(counts)) {
+        stop("dat$counts must be a numeric matrix.")
+    }
+    if (!is.data.frame(meta)) {
+        stop("dat$metadata must be a data frame.")
+    }
+    if (is.null(rownames(counts)) || is.null(colnames(counts)) ||
+        anyNA(rownames(counts)) || anyNA(colnames(counts)) ||
+        any(!nzchar(rownames(counts))) || any(!nzchar(colnames(counts))) ||
+        anyDuplicated(rownames(counts)) || anyDuplicated(colnames(counts))) {
+        stop("dat$counts must have unique, non-empty gene and sample names.")
+    }
+    if (!identical(colnames(counts), rownames(meta))) {
+        stop(
+            "dat$counts columns and dat$metadata rows are not in identical ",
+            "sample order."
+        )
+    }
+    if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
+        stop("dat$counts must contain finite, non-negative values without NA.")
+    }
+
+    scalar_character <- function(x) {
+        is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+    }
+    scalar_logical <- function(x) {
+        is.logical(x) && length(x) == 1L && !is.na(x)
+    }
+    if (!scalar_character(color_by) || !color_by %in% colnames(meta)) {
+        stop("color_by must name one metadata column.")
+    }
+    if (!is.null(shape_by) &&
+        (!scalar_character(shape_by) || !shape_by %in% colnames(meta))) {
+        stop("shape_by must be NULL or name one metadata column.")
+    }
+    if (!scalar_character(label_col)) {
+        stop("label_col must be one non-empty character string.")
+    }
+    if (!is.null(title) && !scalar_character(title)) {
+        stop("title must be NULL or one non-empty character string.")
+    }
+    if (!is.null(save) && !scalar_character(save)) {
+        stop("save must be NULL or one non-empty character path.")
+    }
+    logical_arguments <- list(
+        filter_genes = filter_genes,
+        normalize = normalize,
+        hull = hull,
+        label_samples = label_samples,
+        verbose = verbose
+    )
+    invalid_logical <- names(logical_arguments)[
+        !vapply(logical_arguments, scalar_logical, logical(1))
+    ]
+    if (length(invalid_logical) > 0L) {
+        stop(
+            paste(invalid_logical, collapse = ", "),
+            " must be non-missing logical scalars."
+        )
+    }
+    if (length(n_variable_genes) != 1L || is.na(n_variable_genes) ||
+        !is.numeric(n_variable_genes) || !is.finite(n_variable_genes) ||
+        n_variable_genes < 1 ||
+        n_variable_genes != round(n_variable_genes)) {
+        stop("n_variable_genes must be a positive integer.")
+    }
+    for (pc_name in c("pc_x", "pc_y")) {
+        pc_value <- get(pc_name)
+        if (length(pc_value) != 1L || is.na(pc_value) ||
+            !is.numeric(pc_value) || !is.finite(pc_value) || pc_value < 1 ||
+            pc_value != round(pc_value)) {
+            stop(pc_name, " must be a positive integer.")
+        }
+    }
+    if (pc_x == pc_y) {
+        stop("pc_x and pc_y must identify different principal components.")
+    }
+    numeric_values <- list(
+        point_size = point_size,
+        point_alpha = point_alpha,
+        hull_alpha = hull_alpha,
+        hull_linewidth = hull_linewidth,
+        width = width,
+        height = height
+    )
+    numeric_ranges <- list(
+        point_size = c(0, Inf),
+        point_alpha = c(0, 1),
+        hull_alpha = c(0, 1),
+        hull_linewidth = c(0, Inf),
+        width = c(0, Inf),
+        height = c(0, Inf)
+    )
+    for (argument_name in names(numeric_values)) {
+        value <- numeric_values[[argument_name]]
+        supported_range <- numeric_ranges[[argument_name]]
+        lower <- supported_range[1]
+        upper <- supported_range[2]
+        if (length(value) != 1L || is.na(value) || !is.finite(value) ||
+            value < lower || value > upper ||
+            (argument_name %in% c("point_size", "width", "height") &&
+                value == 0)) {
+            stop(argument_name, " is outside its supported numeric range.")
+        }
+    }
+
+    subset_expr <- substitute(subset)
+    if (!identical(subset_expr, quote(NULL))) {
+        keep_samples <- eval(subset_expr, envir = meta, enclos = parent.frame())
+        if (!is.logical(keep_samples) || length(keep_samples) != nrow(meta)) {
+            stop("subset must evaluate to one logical value per metadata row.")
+        }
+        keep_samples[is.na(keep_samples)] <- FALSE
+        if (!any(keep_samples)) {
+            stop("No samples remain after applying subset.")
+        }
+        meta <- meta[keep_samples, , drop = FALSE]
+        counts <- counts[, rownames(meta), drop = FALSE]
+    }
+    if (ncol(counts) < 3L) {
+        stop("At least 3 samples are required for PCA.")
+    }
+    if (anyNA(meta[[color_by]])) {
+        stop("color_by contains missing values in the selected samples.")
+    }
+    if (!is.null(shape_by) && anyNA(meta[[shape_by]])) {
+        stop("shape_by contains missing values in the selected samples.")
+    }
+
+    make_ordered_factor <- function(values, requested_order, argument_name) {
+        observed <- unique(as.character(values))
+        if (any(!nzchar(observed))) {
+            stop(argument_name, " contains empty group labels.")
+        }
+        if (is.null(requested_order)) {
+            return(factor(as.character(values), levels = observed))
+        }
+        if (!is.character(requested_order) || anyNA(requested_order) ||
+            any(!nzchar(requested_order)) || anyDuplicated(requested_order)) {
+            stop(argument_name, "_order must contain unique, non-empty labels.")
+        }
+        missing_levels <- setdiff(observed, requested_order)
+        if (length(missing_levels) > 0L) {
+            stop(
+                argument_name,
+                "_order is missing observed groups: ",
+                paste(missing_levels, collapse = ", ")
+            )
+        }
+        factor(as.character(values), levels = requested_order)
+    }
+    if (!is.null(shape_by) && identical(shape_by, color_by)) {
+        if (!is.null(color_order) && !is.null(shape_order) &&
+            !identical(color_order, shape_order)) {
+            stop(
+                "color_order and shape_order must be identical when color_by ",
+                "and shape_by name the same metadata column."
+            )
+        }
+        shared_order <- if (!is.null(color_order)) color_order else shape_order
+        meta[[color_by]] <- make_ordered_factor(
+            meta[[color_by]], shared_order, "color/shape"
+        )
+    } else {
+        meta[[color_by]] <- make_ordered_factor(
+            meta[[color_by]], color_order, "color"
+        )
+    }
+    if (!is.null(shape_by) && !identical(shape_by, color_by)) {
+        meta[[shape_by]] <- make_ordered_factor(
+            meta[[shape_by]], shape_order, "shape"
+        )
+    }
+
+    dge <- edgeR::DGEList(counts = counts)
+    n_genes_before <- nrow(dge)
+    if (filter_genes) {
+        keep_genes <- edgeR::filterByExpr(dge, group = meta[[color_by]])
+        dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+    } else {
+        keep_genes <- rep(TRUE, nrow(dge))
+        names(keep_genes) <- rownames(dge)
+    }
+    n_genes_after <- nrow(dge)
+    if (n_genes_after < 2L) {
+        stop("Too few genes remain after filtering.")
+    }
+    if (normalize) {
+        dge <- edgeR::calcNormFactors(dge, method = "TMM")
+    }
+    logcpm <- edgeR::cpm(
+        dge,
+        log = TRUE,
+        prior.count = 2,
+        normalized.lib.sizes = normalize
+    )
+
+    gene_variance <- apply(logcpm, 1L, stats::var, na.rm = TRUE)
+    gene_variance[!is.finite(gene_variance)] <- 0
+    gene_variance <- sort(gene_variance, decreasing = TRUE)
+    n_variable_genes <- min(as.integer(n_variable_genes), length(gene_variance))
+    variable_genes <- names(gene_variance)[seq_len(n_variable_genes)]
+    pca_input <- logcpm[variable_genes, , drop = FALSE]
+    pca <- stats::prcomp(t(pca_input), center = TRUE, scale. = FALSE)
+    total_component_variance <- sum(pca$sdev^2)
+    if (!is.finite(total_component_variance) || total_component_variance <= 0) {
+        stop("PCA has no positive finite variance to display.")
+    }
+    variance_explained <- 100 * pca$sdev^2 / total_component_variance
+    if (max(pc_x, pc_y) > ncol(pca$x)) {
+        stop(
+            "Requested PC does not exist. Available PCs: 1-",
+            ncol(pca$x)
+        )
+    }
+
+    pca_df <- as.data.frame(pca$x, check.names = FALSE)
+    pca_df$PCA_sample_name <- rownames(pca_df)
+    meta_tmp <- meta[pca_df$PCA_sample_name, , drop = FALSE]
+    score_name_collisions <- intersect(colnames(meta_tmp), colnames(pca$x))
+    if (length(score_name_collisions) > 0L) {
+        stop(
+            "Metadata column names conflict with PCA score columns: ",
+            paste(score_name_collisions, collapse = ", ")
+        )
+    }
+    meta_tmp$PCA_sample_name <- NULL
+    pca_df <- cbind(pca_df, meta_tmp)
+
+    color_levels <- levels(droplevels(meta[[color_by]]))
+    if (is.null(colors)) {
+        if (length(color_levels) <= length(BULK_PCA_MACARON_COLORS)) {
+            colors <- BULK_PCA_MACARON_COLORS[seq_along(color_levels)]
+        } else {
+            colors <- grDevices::hcl.colors(
+                length(color_levels), palette = "Pastel 1"
+            )
+        }
+        names(colors) <- color_levels
+    } else {
+        if (!is.character(colors) || length(colors) == 0L || anyNA(colors)) {
+            stop("colors must be a non-empty vector without missing values.")
+        }
+        if (is.null(names(colors))) {
+            if (length(colors) < length(color_levels)) {
+                stop("Not enough colors supplied. Need ", length(color_levels), ".")
+            }
+            colors <- colors[seq_along(color_levels)]
+            names(colors) <- color_levels
+        } else {
+            if (anyDuplicated(names(colors))) {
+                stop("Named colors must have unique names.")
+            }
+            missing_colors <- setdiff(color_levels, names(colors))
+            if (length(missing_colors) > 0L) {
+                stop("Missing colors for: ", paste(missing_colors, collapse = ", "))
+            }
+            colors <- colors[color_levels]
+        }
+    }
+
+    shape_levels <- NULL
+    if (!is.null(shape_by)) {
+        shape_levels <- levels(droplevels(meta[[shape_by]]))
+        if (is.null(shapes)) {
+            default_shapes <- c(16, 17, 15, 18, 8, 3, 7, 4)
+            if (length(shape_levels) > length(default_shapes)) {
+                stop("Too many shape groups; supply shapes manually.")
+            }
+            shapes <- default_shapes[seq_along(shape_levels)]
+            names(shapes) <- shape_levels
+        } else {
+            if (!is.atomic(shapes) || length(shapes) == 0L || anyNA(shapes)) {
+                stop("shapes must be a non-empty vector without missing values.")
+            }
+            if (is.null(names(shapes))) {
+                if (length(shapes) < length(shape_levels)) {
+                    stop("Not enough shapes supplied. Need ", length(shape_levels), ".")
+                }
+                shapes <- shapes[seq_along(shape_levels)]
+                names(shapes) <- shape_levels
+            } else {
+                if (anyDuplicated(names(shapes))) {
+                    stop("Named shapes must have unique names.")
+                }
+                missing_shapes <- setdiff(shape_levels, names(shapes))
+                if (length(missing_shapes) > 0L) {
+                    stop("Missing shapes for: ", paste(missing_shapes, collapse = ", "))
+                }
+                shapes <- shapes[shape_levels]
+            }
+        }
+    }
+
+    x_col <- paste0("PC", pc_x)
+    y_col <- paste0("PC", pc_y)
+    x_lab <- paste0(x_col, " (", round(variance_explained[pc_x], 1), "%)")
+    y_lab <- paste0(y_col, " (", round(variance_explained[pc_y], 1), "%)")
+    p <- ggplot2::ggplot(
+        pca_df,
+        ggplot2::aes(
+            x = .data[[x_col]],
+            y = .data[[y_col]],
+            colour = .data[[color_by]]
+        )
+    )
+
+    if (hull) {
+        hull_list <- lapply(
+            split(pca_df, pca_df[[color_by]], drop = TRUE),
+            function(df) {
+                if (nrow(df) < 3L) {
+                    return(NULL)
+                }
+                coordinates <- unique(df[, c(x_col, y_col), drop = FALSE])
+                if (nrow(coordinates) < 3L) {
+                    return(NULL)
+                }
+                df[grDevices::chull(df[[x_col]], df[[y_col]]), , drop = FALSE]
+            }
+        )
+        hull_list <- hull_list[
+            !vapply(hull_list, is.null, logical(1))
+        ]
+        if (length(hull_list) > 0L) {
+            hull_df <- do.call(rbind, hull_list)
+            rownames(hull_df) <- NULL
+            p <- p +
+                ggplot2::geom_polygon(
+                    data = hull_df,
+                    mapping = ggplot2::aes(
+                        x = .data[[x_col]],
+                        y = .data[[y_col]],
+                        group = .data[[color_by]],
+                        fill = .data[[color_by]]
+                    ),
+                    inherit.aes = FALSE,
+                    alpha = hull_alpha,
+                    colour = NA,
+                    show.legend = FALSE
+                ) +
+                ggplot2::geom_polygon(
+                    data = hull_df,
+                    mapping = ggplot2::aes(
+                        x = .data[[x_col]],
+                        y = .data[[y_col]],
+                        group = .data[[color_by]],
+                        colour = .data[[color_by]]
+                    ),
+                    inherit.aes = FALSE,
+                    fill = NA,
+                    linewidth = hull_linewidth,
+                    show.legend = FALSE
+                )
+        }
+    }
+
+    if (is.null(shape_by)) {
+        p <- p + ggplot2::geom_point(
+            size = point_size, alpha = point_alpha, stroke = 0.4
+        )
+    } else {
+        p <- p + ggplot2::geom_point(
+            mapping = ggplot2::aes(shape = .data[[shape_by]]),
+            size = point_size,
+            alpha = point_alpha,
+            stroke = 0.6
+        )
+    }
+
+    if (label_samples) {
+        if (!label_col %in% colnames(pca_df)) {
+            if (identical(label_col, "SampleName")) {
+                pca_df$SampleName <- pca_df$PCA_sample_name
+            } else {
+                stop("label_col '", label_col, "' was not found in metadata.")
+            }
+        }
+        p <- p + ggrepel::geom_text_repel(
+            data = pca_df,
+            mapping = ggplot2::aes(
+                x = .data[[x_col]],
+                y = .data[[y_col]],
+                label = .data[[label_col]]
+            ),
+            inherit.aes = FALSE,
+            size = 2.6,
+            box.padding = 0.35,
+            point.padding = 0.25,
+            segment.linewidth = 0.3,
+            max.overlaps = Inf,
+            show.legend = FALSE
+        )
+    }
+
+    p <- p + ggplot2::scale_colour_manual(
+        values = colors, breaks = color_levels, drop = FALSE
+    )
+    if (hull) {
+        p <- p + ggplot2::scale_fill_manual(
+            values = colors, breaks = color_levels, drop = FALSE
+        )
+    }
+    if (!is.null(shape_by)) {
+        p <- p + ggplot2::scale_shape_manual(
+            values = shapes, breaks = shape_levels, drop = FALSE
+        )
+    }
+
+    p <- p +
+        ggplot2::labs(
+            x = x_lab,
+            y = y_lab,
+            colour = color_by,
+            shape = shape_by,
+            title = title
+        ) +
+        ggplot2::theme_classic(base_size = 10) +
+        ggplot2::theme(
+            panel.grid = ggplot2::element_blank(),
+            axis.line = ggplot2::element_line(linewidth = 0.55, colour = "black"),
+            axis.ticks = ggplot2::element_line(linewidth = 0.45, colour = "black"),
+            axis.ticks.length = grid::unit(2, "mm"),
+            axis.text = ggplot2::element_text(colour = "black", size = 9),
+            axis.title = ggplot2::element_text(colour = "black", size = 10),
+            plot.title = ggplot2::element_text(
+                hjust = 0.5, size = 11, face = "bold", colour = "black"
+            ),
+            legend.title = ggplot2::element_text(size = 9, colour = "black"),
+            legend.text = ggplot2::element_text(size = 8, colour = "black"),
+            legend.key = ggplot2::element_blank(),
+            legend.background = ggplot2::element_blank(),
+            plot.margin = ggplot2::margin(5.5, 5.5, 5.5, 5.5)
+        )
+
+    if (!is.null(save)) {
+        if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
+            ggplot2::ggsave(
+                filename = save,
+                plot = p,
+                width = width,
+                height = height,
+                units = "in",
+                device = grDevices::cairo_pdf
+            )
+        } else {
+            ggplot2::ggsave(
+                filename = save,
+                plot = p,
+                width = width,
+                height = height,
+                units = "in",
+                dpi = 300
+            )
+        }
+    }
+
+    if (verbose) {
+        message("")
+        message("========================================")
+        message(" Bulk RNA-seq PCA")
+        message("========================================")
+        message("Samples:                ", ncol(counts))
+        message("Genes before filtering: ", n_genes_before)
+        message("Genes after filtering:  ", n_genes_after)
+        message("Genes used for PCA:     ", nrow(pca_input))
+        message(x_col, ":                    ", round(variance_explained[pc_x], 1), "%")
+        message(y_col, ":                    ", round(variance_explained[pc_y], 1), "%")
+        message("Color:                  ", color_by)
+        if (!is.null(shape_by)) {
+            message("Shape:                  ", shape_by)
+        }
+        message("========================================")
+        message("")
+    }
+
+    list(
+        plot = p,
+        pca = pca,
+        pca_data = pca_df,
+        logCPM = logcpm,
+        variable_genes = variable_genes,
+        gene_variance = gene_variance,
+        variance_explained = variance_explained,
+        dge = dge,
+        keep_genes = keep_genes,
+        colors = colors,
+        shapes = if (!is.null(shape_by)) shapes else NULL
+    )
+}
