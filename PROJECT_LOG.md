@@ -4,6 +4,38 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-09-11
+
+### Added
+
+- Added the repository-level `README.md` as the maintained function reference
+  for both language-specific single-cell RNA-seq pipelines.
+- Catalogued all seven exported Python functions with their workflow roles,
+  inputs, principal return values, practical examples, dependencies, and
+  relevant scientific caveats.
+- Documented the reusable `MHCII_GROUP_COLORS` and `WT_CKO_COLORS` palettes.
+- Documented that the R pipeline is currently a structured scaffold without
+  reusable functions, so users can distinguish implemented functionality from
+  planned sections.
+
+### Changed
+
+- Established the maintenance convention that `README.md` is updated whenever
+  a function, palette, parameter interface, or return value is added or
+  changed.
+
+### Verification
+
+- Automated tests were not added or run, following the user's standing
+  instruction.
+- Reviewed the README against the exported Python interface, the R pipeline,
+  and the Git diff before committing.
+
+### Commit
+
+- `docs: add pipeline function reference README` — Added the maintained Python
+  and R pipeline reference and this log entry.
+
 ## 2026-09-07
 
 ### Added
