@@ -53,6 +53,7 @@ from Python.scRNAseq_preprocessing import (
     plot_anndata_group_umap,
     plot_seurat_violins,
     read_one_gsm,
+    score_and_assign_two_signatures,
     trim_axs,
 )
 ```
@@ -64,6 +65,7 @@ from Python.scRNAseq_preprocessing import (
 | 10X preparation | `convert_genes_to_features()` | Converts legacy compressed 10X gene tables into modern feature tables. | List of output `Path` objects written during the call. |
 | Data loading | `read_one_gsm()` | Reads one GEO 10X matrix and records the original barcode and GSM accession. | `AnnData` object. |
 | Cell calling | `ordmag_filter()` | Applies an approximate Cell Ranger OrdMag Step 1 UMI threshold. | Cell mask, UMI threshold, and per-barcode UMI totals. |
+| Signature scoring | `score_and_assign_two_signatures()` | Scores two gene programs and assigns each cell to the higher-scoring signature. | The annotated input `AnnData` object. |
 | Figure layout | `trim_axs()` | Removes unused Matplotlib axes from a subplot grid. | Flattened array of retained axes. |
 | UMAP visualization | `plot_anndata_group_umap()` | Plots one or more categorical UMAP panels, including split and highlight modes. | Figure and axes array. |
 | Composition visualization | `plot_adata_stacked_bar()` | Calculates and plots cell-composition percentages from `adata.obs`. | Figure and axes; optionally the percentage table. |
@@ -131,6 +133,40 @@ Important: this is an approximate preliminary cell-calling heuristic. It does
 not implement EmptyDrops-style testing, doublet detection, or complete
 dataset-specific QC. Inspect count distributions and select QC thresholds for
 each study rather than treating the default as universally appropriate.
+
+### Signature scoring and annotation
+
+#### `score_and_assign_two_signatures(...)`
+
+Calculates two Scanpy gene-set scores from `adata.raw`, a named layer, or
+`adata.X`, then assigns each cell to the signature with the higher score. Ties
+are assigned to the first signature. Optional ambiguity handling assigns cells
+to a third label when both scores fall below a specified threshold.
+
+```python
+adata = score_and_assign_two_signatures(
+    adata,
+    gene_list_1=["Cd74", "H2-Ab1"],
+    gene_list_2=["S100a8", "S100a9"],
+    label_1="MHCIIhi",
+    label_2="Inflammatory",
+    ambiguous=True,
+    ambiguous_threshold=0,
+    use_raw=True,
+)
+```
+
+The function modifies and returns the original AnnData object. It writes the
+two score columns and the final assignment column to `adata.obs`; their names
+are configurable. Duplicate genes are removed, missing genes are reported, and
+each signature must contain at least one gene present in the selected source.
+
+Use an expression representation appropriate for gene-set scoring, commonly
+normalized and log-transformed values. Optional scaling is performed on a
+temporary copy so the original matrix is protected. However, centred scaling
+can densify sparse data and require substantial memory; consider
+`zero_center=False` or `scale=False` for large datasets when scientifically
+appropriate.
 
 ### Visualization
 

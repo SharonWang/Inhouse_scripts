@@ -35,6 +35,7 @@ __all__ = [
     "plot_anndata_group_umap",
     "plot_seurat_violins",
     "read_one_gsm",
+    "score_and_assign_two_signatures",
     "trim_axs",
 ]
 
@@ -377,6 +378,325 @@ def ordmag_filter(
     print(f"Called cells: {keep.sum():,}")
 
     return keep, threshold, total_umi
+
+
+# =============================================================================
+# Signature scoring and annotation
+# =============================================================================
+
+
+def score_and_assign_two_signatures(
+    adata: AnnData,
+    gene_list_1: Iterable[str],
+    gene_list_2: Iterable[str],
+    score_name_1: str = "Signature1_score",
+    score_name_2: str = "Signature2_score",
+    output_col: str = "Signature_group",
+    label_1: str = "Signature1",
+    label_2: str = "Signature2",
+    ambiguous_label: str = "Ambiguous",
+    use_raw: bool = True,
+    layer: str | None = None,
+    scale: bool = True,
+    max_value: float | None = 10,
+    zero_center: bool = True,
+    ambiguous: bool = False,
+    ambiguous_threshold: float = 0,
+    ctrl_size: int = 50,
+    n_bins: int = 25,
+    random_state: int | None = 0,
+    make_categorical: bool = True,
+    verbose: bool = True,
+) -> AnnData:
+    """Score two gene signatures and assign each cell to the higher score.
+
+    The function constructs a temporary AnnData object from the selected
+    expression source, optionally scales that matrix, and calculates both
+    scores with :func:`scanpy.tl.score_genes`. The scores and final assignment
+    are then written to the original object's ``obs`` table. Ties are assigned
+    to ``label_1``. When ambiguity handling is enabled, a cell is assigned to
+    ``ambiguous_label`` if both scores are below ``ambiguous_threshold``.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object to annotate. Its observation order is preserved. The
+        selected expression source must contain cells in the same order as
+        ``adata.obs``.
+    gene_list_1 : iterable of str
+        Genes defining the first signature. Duplicate names are removed while
+        preserving their first occurrence. Missing genes are reported and
+        ignored, but at least one requested gene must be available.
+    gene_list_2 : iterable of str
+        Genes defining the second signature. Duplicate names are removed while
+        preserving their first occurrence. Missing genes are reported and
+        ignored, but at least one requested gene must be available.
+    score_name_1 : str, default="Signature1_score"
+        Name of the first score column written to ``adata.obs``.
+    score_name_2 : str, default="Signature2_score"
+        Name of the second score column written to ``adata.obs``.
+    output_col : str, default="Signature_group"
+        Name of the final signature-assignment column written to ``adata.obs``.
+    label_1 : str, default="Signature1"
+        Assignment for cells whose first score is greater than or equal to
+        their second score.
+    label_2 : str, default="Signature2"
+        Assignment for cells whose second score is greater than their first
+        score.
+    ambiguous_label : str, default="Ambiguous"
+        Assignment for cells whose two scores are both below
+        ``ambiguous_threshold`` when ``ambiguous=True``.
+    use_raw : bool, default=True
+        Whether to score expression from ``adata.raw``. This cannot be enabled
+        together with ``layer``.
+    layer : str, optional
+        Name of an AnnData layer to score. When omitted with ``use_raw=False``,
+        expression is obtained from ``adata.X``.
+    scale : bool, default=True
+        Whether to call :func:`scanpy.pp.scale` on the temporary scoring object
+        before calculating the signatures. The original expression matrix is
+        not scaled or otherwise modified.
+    max_value : float, optional, default=10
+        Maximum absolute scaled value passed to :func:`scanpy.pp.scale`. Use
+        ``None`` to disable clipping.
+    zero_center : bool, default=True
+        Whether :func:`scanpy.pp.scale` zero-centres expression values. Centred
+        scaling can convert a sparse matrix to a dense matrix.
+    ambiguous : bool, default=False
+        Whether to assign ``ambiguous_label`` when both scores are below the
+        ambiguity threshold.
+    ambiguous_threshold : float, default=0
+        Strict upper bound used for both scores when identifying ambiguous
+        cells. A cell is ambiguous only when both values are below this value.
+    ctrl_size : int, default=50
+        Number of reference genes sampled for each expression bin by
+        :func:`scanpy.tl.score_genes`. Must be a positive integer.
+    n_bins : int, default=25
+        Number of expression-level bins used to select reference genes. Must be
+        an integer of at least two.
+    random_state : int, optional, default=0
+        Random seed passed to :func:`scanpy.tl.score_genes` for reproducible
+        control-gene selection. Use ``None`` to leave it unspecified.
+    make_categorical : bool, default=True
+        Whether to store ``output_col`` as an ordered pandas categorical. The
+        order is ``label_1``, optionally ``ambiguous_label``, then ``label_2``.
+    verbose : bool, default=True
+        Whether to print the expression source, present and missing genes,
+        score summaries, and assignment counts and percentages.
+
+    Returns
+    -------
+    anndata.AnnData
+        The same object supplied through ``adata``, modified in place with
+        ``score_name_1``, ``score_name_2``, and ``output_col`` in ``adata.obs``.
+        Existing columns with those names are replaced.
+
+    Raises
+    ------
+    TypeError
+        If a gene list is not iterable, contains non-string values, or a
+        scoring-size parameter has the wrong type.
+    ValueError
+        If output names or group labels are invalid, the requested expression
+        source is unavailable or conflicting, a gene list is empty or has no
+        genes in the selected source, or a scoring-size parameter is invalid.
+    ImportError
+        If Scanpy or AnnData is not installed in the active environment.
+
+    Examples
+    --------
+    >>> adata = score_and_assign_two_signatures(
+    ...     adata,
+    ...     gene_list_1=["Cd74", "H2-Ab1"],
+    ...     gene_list_2=["S100a8", "S100a9"],
+    ...     label_1="MHCIIhi",
+    ...     label_2="Inflammatory",
+    ...     ambiguous=True,
+    ...     ambiguous_threshold=0,
+    ... )
+    >>> adata.obs[["Signature1_score", "Signature2_score", "Signature_group"]]
+
+    Notes
+    -----
+    Supply an expression representation appropriate for gene-set scoring,
+    commonly normalized and log-transformed values. If raw counts are stored in
+    ``adata.raw``, the default ``use_raw=True`` may not be analytically
+    appropriate. With ``scale=True``, the selected matrix is copied so the
+    original data are protected; ``zero_center=True`` may densify sparse data
+    and substantially increase memory use for large datasets.
+    """
+    # Output columns must be distinct so scores are not silently overwritten.
+    output_names = [score_name_1, score_name_2, output_col]
+    if any(not isinstance(name, str) or not name.strip() for name in output_names):
+        raise ValueError("score and output column names must be non-empty strings")
+    if len(set(output_names)) != len(output_names):
+        raise ValueError("score_name_1, score_name_2, and output_col must be distinct")
+
+    # Ordered categorical labels must be unique and non-empty.
+    labels = [label_1, label_2]
+    if ambiguous:
+        labels.append(ambiguous_label)
+    if any(not isinstance(label, str) or not label.strip() for label in labels):
+        raise ValueError("assignment labels must be non-empty strings")
+    if len(set(labels)) != len(labels):
+        raise ValueError("assignment labels must be distinct")
+
+    if use_raw and layer is not None:
+        raise ValueError("Choose either use_raw=True or layer=..., not both")
+    if layer is not None and (not isinstance(layer, str) or not layer.strip()):
+        raise ValueError("layer must be a non-empty string when provided")
+
+    if isinstance(ctrl_size, bool) or not isinstance(ctrl_size, Integral):
+        raise TypeError("ctrl_size must be an integer")
+    if ctrl_size <= 0:
+        raise ValueError("ctrl_size must be greater than zero")
+    if isinstance(n_bins, bool) or not isinstance(n_bins, Integral):
+        raise TypeError("n_bins must be an integer")
+    if n_bins < 2:
+        raise ValueError("n_bins must be at least two")
+
+    def clean_gene_list(genes: Iterable[str], argument_name: str) -> list[str]:
+        """Validate, de-duplicate, and preserve the order of a gene list."""
+        if isinstance(genes, str):
+            genes = [genes]
+        try:
+            cleaned = list(dict.fromkeys(genes))
+        except TypeError as exc:
+            raise TypeError(f"{argument_name} must be an iterable of strings") from exc
+        if not cleaned:
+            raise ValueError(f"{argument_name} must contain at least one gene")
+        if any(not isinstance(gene, str) or not gene for gene in cleaned):
+            raise TypeError(f"{argument_name} must contain only non-empty strings")
+        return cleaned
+
+    genes_1 = clean_gene_list(gene_list_1, "gene_list_1")
+    genes_2 = clean_gene_list(gene_list_2, "gene_list_2")
+
+    # Import optional single-cell dependencies only when scoring is requested.
+    import anndata
+    import scanpy as sc
+
+    # Work on an independent matrix so optional scaling never changes adata.
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("use_raw=True, but adata.raw is None")
+        source_matrix = adata.raw.X
+        source_var = adata.raw.var
+        source_name = "adata.raw"
+    elif layer is not None:
+        if layer not in adata.layers:
+            available_layers = list(adata.layers.keys())
+            raise ValueError(
+                f"Layer '{layer}' not found. Available layers: {available_layers}"
+            )
+        source_matrix = adata.layers[layer]
+        source_var = adata.var
+        source_name = f"adata.layers['{layer}']"
+    else:
+        source_matrix = adata.X
+        source_var = adata.var
+        source_name = "adata.X"
+
+    adata_score = anndata.AnnData(
+        X=source_matrix.copy(),
+        obs=adata.obs.copy(),
+        var=source_var.copy(),
+    )
+    adata_score.var_names = adata_score.var_names.astype(str)
+
+    available_genes = set(adata_score.var_names)
+    genes_1_present = [gene for gene in genes_1 if gene in available_genes]
+    genes_2_present = [gene for gene in genes_2 if gene in available_genes]
+    genes_1_missing = [gene for gene in genes_1 if gene not in available_genes]
+    genes_2_missing = [gene for gene in genes_2 if gene not in available_genes]
+
+    if not genes_1_present:
+        raise ValueError("None of the genes in gene_list_1 were found")
+    if not genes_2_present:
+        raise ValueError("None of the genes in gene_list_2 were found")
+
+    if verbose:
+        print(f"Expression source: {source_name}")
+        print(f"\n{score_name_1}: {len(genes_1_present)}/{len(genes_1)} genes found")
+        if genes_1_missing:
+            print("Missing:", genes_1_missing)
+        print(f"\n{score_name_2}: {len(genes_2_present)}/{len(genes_2)} genes found")
+        if genes_2_missing:
+            print("Missing:", genes_2_missing)
+
+    if scale:
+        if verbose:
+            print(
+                f"\nScaling expression (max_value={max_value}, "
+                f"zero_center={zero_center})..."
+            )
+        sc.pp.scale(
+            adata_score,
+            zero_center=zero_center,
+            max_value=max_value,
+        )
+
+    # Calculate each score independently using the same expression background.
+    sc.tl.score_genes(
+        adata_score,
+        gene_list=genes_1_present,
+        score_name=score_name_1,
+        ctrl_size=ctrl_size,
+        n_bins=n_bins,
+        random_state=random_state,
+        use_raw=False,
+    )
+    sc.tl.score_genes(
+        adata_score,
+        gene_list=genes_2_present,
+        score_name=score_name_2,
+        ctrl_size=ctrl_size,
+        n_bins=n_bins,
+        random_state=random_state,
+        use_raw=False,
+    )
+
+    # Reindex defensively before copying scores back to the original object.
+    adata.obs[score_name_1] = adata_score.obs[score_name_1].reindex(
+        adata.obs_names
+    ).to_numpy()
+    adata.obs[score_name_2] = adata_score.obs[score_name_2].reindex(
+        adata.obs_names
+    ).to_numpy()
+
+    score_1 = adata.obs[score_name_1]
+    score_2 = adata.obs[score_name_2]
+    groups = np.where(score_1 >= score_2, label_1, label_2).astype(object)
+
+    if ambiguous:
+        ambiguous_mask = (
+            (score_1 < ambiguous_threshold) & (score_2 < ambiguous_threshold)
+        )
+        groups[ambiguous_mask] = ambiguous_label
+
+    adata.obs[output_col] = groups
+    if make_categorical:
+        category_order = [label_1, label_2]
+        if ambiguous:
+            category_order.insert(1, ambiguous_label)
+        adata.obs[output_col] = pd.Categorical(
+            adata.obs[output_col],
+            categories=category_order,
+            ordered=True,
+        )
+
+    if verbose:
+        print("\nScore summary:")
+        print(adata.obs[[score_name_1, score_name_2]].describe())
+        print(f"\n{output_col}:")
+        counts = adata.obs[output_col].value_counts(sort=False)
+        percentages = adata.obs[output_col].value_counts(
+            normalize=True,
+            sort=False,
+        ) * 100
+        print(pd.DataFrame({"n": counts, "percent": percentages}))
+
+    return adata
 
 
 # =============================================================================

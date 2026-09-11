@@ -10,19 +10,28 @@ preprocessing pipelines. All project files are maintained under
 
 - Added the repository-level `README.md` as the maintained function reference
   for both language-specific single-cell RNA-seq pipelines.
-- Catalogued all seven exported Python functions with their workflow roles,
+- Catalogued all exported Python functions with their workflow roles,
   inputs, principal return values, practical examples, dependencies, and
   relevant scientific caveats.
 - Documented the reusable `MHCII_GROUP_COLORS` and `WT_CKO_COLORS` palettes.
 - Documented that the R pipeline is currently a structured scaffold without
   reusable functions, so users can distinguish implemented functionality from
   planned sections.
+- Added `score_and_assign_two_signatures()` to the Python signature-scoring and
+  annotation section. The function scores two supplied gene programs from
+  `adata.raw`, a selected layer, or `adata.X`, then assigns each cell to the
+  higher score with optional ambiguity handling.
 
 ### Changed
 
 - Established the maintenance convention that `README.md` is updated whenever
   a function, palette, parameter interface, or return value is added or
   changed.
+- Added validation for signature genes, expression-source conflicts, scoring
+  parameters, output-column collisions, and categorical labels while
+  preserving first-signature assignment for tied scores.
+- Kept scaling isolated from the original expression matrix and documented the
+  potential memory cost of zero-centred scaling on sparse matrices.
 
 ### Verification
 
@@ -35,6 +44,8 @@ preprocessing pipelines. All project files are maintained under
 
 - `docs: add pipeline function reference README` — Added the maintained Python
   and R pipeline reference and this log entry.
+- `feat: add two-signature scoring and assignment` — Added reusable two-program
+  scoring, assignment, validation, documentation, and the updated README index.
 
 ## 2026-09-07
 
