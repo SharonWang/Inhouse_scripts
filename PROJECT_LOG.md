@@ -28,6 +28,13 @@ preprocessing pipelines. All project files are maintained under
 - Added complete Roxygen documentation for every input and returned list
   component, including dependencies, side effects, examples, and analytical
   scope.
+- Added `check_featurecounts_project()` to the R quality-control section for
+  auditing count, metadata, gene, and optional QC ordering; identifier
+  uniqueness; missing, negative, and integer-like counts; and assignment-rate
+  summaries.
+- Preserved the supplied human-readable audit while adding an invisible,
+  structured result with overall and individual check outcomes for reuse in
+  automated workflows.
 
 ### Changed
 
@@ -42,6 +49,10 @@ preprocessing pipelines. All project files are maintained under
 - Updated the README's R function index and clarified that the featureCounts
   reader supports bulk RNA-seq or sample-level pseudobulk data rather than
   cell-by-gene single-cell matrices.
+- Documented the distinction between structural validity and integer-like
+  counts, since fractional featureCounts output can be intentional.
+- Added an explicit finite-count check so infinite values cannot be omitted
+  from aggregate audit results or incorrectly reported as valid.
 
 ### Verification
 
@@ -59,6 +70,8 @@ preprocessing pipelines. All project files are maintained under
 - `feat: add featureCounts project reader` — Added the reusable R importer,
   alignment and QC safeguards, optional annotation and edgeR output, and
   corresponding README documentation.
+- `feat: add featureCounts project checker` — Added reusable structural and
+  count-value auditing with printed and programmatic results.
 
 ## 2026-09-07
 

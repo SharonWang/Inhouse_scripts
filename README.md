@@ -287,6 +287,7 @@ and visualization and export.
 | Workflow stage | Function | What it does | Main return value(s) |
 |---|---|---|---|
 | Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
+| Bulk/pseudobulk structural QC | `check_featurecounts_project()` | Audits ordering, identifier uniqueness, invalid count values, integer-likeness, and assignment-rate summaries. | An invisible structured audit containing overall flags, individual checks, and assignment summary. |
 
 ### `read_featurecounts_project(...)`
 
@@ -327,6 +328,31 @@ not a cell-by-gene single-cell matrix. It performs import and structural QC but
 does not choose expression filters, normalize libraries, construct a design,
 or run differential-expression tests. Those steps must account for biological
 replication and the study design.
+
+### `check_featurecounts_project(dat, tolerance=1e-8, verbose=TRUE)`
+
+Checks the internal consistency of an imported featureCounts project without
+modifying it. The printed audit retains the original interactive checks, while
+the invisible return value makes the result reusable in scripts.
+
+```r
+audit <- check_featurecounts_project(project)
+
+audit$valid
+audit$all_checks_pass
+audit$checks
+audit$assignment_summary
+```
+
+The function checks that samples and genes have consistent ordering, sample
+and gene identifiers are unique, and counts contain no missing or negative
+values. It also rejects non-finite values such as positive or negative
+infinity. Integer-likeness uses a configurable numerical tolerance. Because
+fractional featureCounts output can be intentional, `audit$valid` covers
+structural and value integrity without requiring integer-like counts;
+`audit$all_checks_pass` includes the integer-likeness result. When
+`Assignment_percent` is present in the metadata, its summary is printed and
+returned.
 
 When another R function is supplied, it will be added to the appropriate
 section in the R pipeline, documented with complete Roxygen comments for inputs

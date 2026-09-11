@@ -677,6 +677,238 @@ read_featurecounts_project <- function(
 # =============================================================================
 
 
+#' Check the internal consistency of a featureCounts project
+#'
+#' Audit the count matrix, metadata, gene annotation, and optional QC table
+#' returned by [read_featurecounts_project()]. The function checks ordering,
+#' identifier uniqueness, missing and non-finite values, negative counts, and
+#' whether count values are integer-like. Assignment-rate summary statistics
+#' are included when the metadata contains `Assignment_percent`.
+#'
+#' @param dat A `featurecounts_project` object, or a list with `counts`,
+#'   `metadata`, and `genes` elements and an optional `qc` element. `counts`
+#'   must be a numeric matrix with gene row names and sample column names;
+#'   metadata and gene annotation must have row names.
+#' @param tolerance Non-negative numeric scalar. Maximum absolute difference
+#'   between a count and its rounded value for that count to be considered
+#'   integer-like. The default allows negligible floating-point error.
+#' @param verbose Logical scalar. Whether to print the formatted audit and
+#'   assignment-rate summary. The structured result is returned regardless.
+#'
+#' @return Invisibly returns a named list with these elements:
+#'   \describe{
+#'     \item{valid}{Logical scalar indicating whether all structural and value
+#'       checks pass. Integer-likeness is reported separately and does not make
+#'       fractional featureCounts output structurally invalid.}
+#'     \item{all_checks_pass}{Logical scalar indicating whether every
+#'       applicable check, including integer-likeness, passes.}
+#'     \item{checks}{Named logical vector of positive checks. The QC-order
+#'       element is `NA` when `dat$qc` is `NULL`.}
+#'     \item{assignment_summary}{The result of [summary()] for
+#'       `metadata$Assignment_percent`, or `NULL` when that column is absent.}
+#'   }
+#'
+#' @details
+#' The audit is read-only and does not modify `dat`. A `FALSE` result identifies
+#' a consistency issue but does not repair it. Fractional counts can be valid
+#' when featureCounts was deliberately run with fractional assignment, so the
+#' `valid` result excludes the integer-likeness check while
+#' `all_checks_pass` includes it.
+#'
+#' @examples
+#' \dontrun{
+#' project <- read_featurecounts_project(
+#'   fcounts_file = "counts/featureCounts.txt",
+#'   metadata = "metadata/samples.csv"
+#' )
+#'
+#' audit <- check_featurecounts_project(project)
+#' audit$valid
+#' audit$checks
+#' }
+#'
+#' @export
+check_featurecounts_project <- function(
+    dat,
+    tolerance = 1e-8,
+    verbose = TRUE
+) {
+    # -------------------------------------------------------------------------
+    # Validate the supplied project structure
+    # -------------------------------------------------------------------------
+    if (!is.list(dat)) {
+        stop("dat must be a featurecounts_project object or compatible list.")
+    }
+
+    required_elements <- c("counts", "metadata", "genes")
+    missing_elements <- setdiff(required_elements, names(dat))
+    if (length(missing_elements) > 0L) {
+        stop(
+            "dat is missing required elements: ",
+            paste(missing_elements, collapse = ", ")
+        )
+    }
+
+    if (!is.matrix(dat$counts) || !is.numeric(dat$counts)) {
+        stop("dat$counts must be a numeric matrix.")
+    }
+    if (is.null(rownames(dat$counts)) || is.null(colnames(dat$counts))) {
+        stop("dat$counts must have gene row names and sample column names.")
+    }
+    if (!is.data.frame(dat$metadata) || is.null(rownames(dat$metadata))) {
+        stop("dat$metadata must be a data frame with sample row names.")
+    }
+    if (!is.data.frame(dat$genes) || is.null(rownames(dat$genes))) {
+        stop("dat$genes must be a data frame with gene row names.")
+    }
+    if (!is.null(dat$qc) &&
+        (!is.data.frame(dat$qc) || is.null(rownames(dat$qc)))) {
+        stop("dat$qc must be NULL or a data frame with sample row names.")
+    }
+    if (!is.numeric(tolerance) ||
+        length(tolerance) != 1L ||
+        is.na(tolerance) ||
+        !is.finite(tolerance) ||
+        tolerance < 0) {
+        stop("tolerance must be a finite, non-negative numeric scalar.")
+    }
+    if (!is.logical(verbose) || length(verbose) != 1L || is.na(verbose)) {
+        stop("verbose must be a non-missing logical scalar.")
+    }
+
+    # -------------------------------------------------------------------------
+    # Calculate positive consistency checks
+    # -------------------------------------------------------------------------
+    counts_metadata_order <- identical(
+        colnames(dat$counts),
+        rownames(dat$metadata)
+    )
+    counts_qc_order <- if (is.null(dat$qc)) {
+        NA
+    } else {
+        identical(colnames(dat$counts), rownames(dat$qc))
+    }
+    counts_genes_order <- identical(
+        rownames(dat$counts),
+        rownames(dat$genes)
+    )
+    sample_names_unique <- anyDuplicated(colnames(dat$counts)) == 0L
+    gene_ids_unique <- anyDuplicated(rownames(dat$counts)) == 0L
+    counts_complete <- !anyNA(dat$counts)
+    counts_finite <- all(is.finite(dat$counts))
+    counts_nonnegative <- if (counts_complete && counts_finite) {
+        !any(dat$counts < 0)
+    } else {
+        NA
+    }
+    integer_like_counts <- if (counts_complete && counts_finite) {
+        all(abs(dat$counts - round(dat$counts)) <= tolerance)
+    } else {
+        NA
+    }
+
+    checks <- c(
+        counts_metadata_order = counts_metadata_order,
+        counts_qc_order = counts_qc_order,
+        counts_genes_order = counts_genes_order,
+        sample_names_unique = sample_names_unique,
+        gene_ids_unique = gene_ids_unique,
+        counts_complete = counts_complete,
+        counts_finite = counts_finite,
+        counts_nonnegative = counts_nonnegative,
+        integer_like_counts = integer_like_counts
+    )
+
+    structural_checks <- checks[names(checks) != "integer_like_counts"]
+    valid <- all(structural_checks[!is.na(structural_checks)])
+    all_checks_pass <- all(checks[!is.na(checks)])
+
+    assignment_summary <- NULL
+    if ("Assignment_percent" %in% colnames(dat$metadata)) {
+        assignment_summary <- summary(dat$metadata$Assignment_percent)
+    }
+
+    # -------------------------------------------------------------------------
+    # Print a human-readable audit matching the original interactive workflow
+    # -------------------------------------------------------------------------
+    if (verbose) {
+        cat("====================================\n")
+        cat("Checking featureCounts project\n")
+        cat("====================================\n\n")
+        cat(
+            "counts <-> metadata order: ",
+            counts_metadata_order,
+            "\n",
+            sep = ""
+        )
+        if (!is.null(dat$qc)) {
+            cat(
+                "counts <-> QC order:       ",
+                counts_qc_order,
+                "\n",
+                sep = ""
+            )
+        }
+        cat(
+            "counts <-> genes order:    ",
+            counts_genes_order,
+            "\n",
+            sep = ""
+        )
+        cat(
+            "Duplicated sample names:   ",
+            !sample_names_unique,
+            "\n",
+            sep = ""
+        )
+        cat(
+            "Duplicated gene IDs:       ",
+            !gene_ids_unique,
+            "\n",
+            sep = ""
+        )
+        cat(
+            "NA values in counts:       ",
+            !counts_complete,
+            "\n",
+            sep = ""
+        )
+        cat(
+            "Non-finite counts:         ",
+            !counts_finite,
+            "\n",
+            sep = ""
+        )
+        cat(
+            "Negative counts:           ",
+            !counts_nonnegative,
+            "\n",
+            sep = ""
+        )
+        cat(
+            "Integer counts:            ",
+            integer_like_counts,
+            "\n",
+            sep = ""
+        )
+
+        if (!is.null(assignment_summary)) {
+            cat("\nAssignment rate:\n")
+            print(assignment_summary)
+        }
+        cat("\n====================================\n")
+    }
+
+    result <- list(
+        valid = valid,
+        all_checks_pass = all_checks_pass,
+        checks = checks,
+        assignment_summary = assignment_summary
+    )
+    invisible(result)
+}
+
+
 # =============================================================================
 # Normalization and feature selection
 # =============================================================================
