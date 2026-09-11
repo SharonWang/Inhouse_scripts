@@ -1238,6 +1238,739 @@ subset_featurecounts_project <- function(
 
 
 # =============================================================================
+# Pairwise differential expression
+# =============================================================================
+
+
+#' Prepare a two-group RNA-seq differential-expression comparison
+#'
+#' Validate and select samples, remove incomplete model rows, construct a
+#' two-group design with optional covariates, and define a contrast for
+#' `group2 - group1`. This internal helper centralizes the design semantics used
+#' by [edgeR_pairwise()] and [limma_voom_pairwise()].
+#'
+#' @param dat A `featurecounts_project` or compatible list containing a numeric
+#'   gene-by-sample `counts` matrix, sample `metadata`, and gene annotation
+#'   `genes` data frame in matching orders.
+#' @param group_col Character scalar naming the metadata column that defines the
+#'   comparison groups.
+#' @param group1 Character scalar naming the reference group.
+#' @param group2 Character scalar naming the comparison group. Positive log-fold
+#'   changes represent higher expression in `group2` than `group1`.
+#' @param subset_expr `NULL` or a quoted expression that returns one logical
+#'   value per metadata row. Missing values are treated as `FALSE`.
+#' @param subset_env Environment used to resolve names in `subset_expr` that are
+#'   not metadata columns.
+#' @param covariates `NULL` or a character vector naming additional metadata
+#'   variables to include in the model.
+#' @param verbose Logical scalar. Whether to print the comparison, replicate
+#'   counts, removed incomplete samples, and covariates.
+#'
+#' @return A list containing selected `counts`, `metadata`, and `genes`; the
+#'   ordered group factor; design matrix; numeric `group2 - group1` contrast;
+#'   group names and group-column name; and sample counts for both groups.
+#'
+#' @keywords internal
+.prepare_pairwise_dat <- function(
+    dat,
+    group_col,
+    group1,
+    group2,
+    subset_expr = NULL,
+    subset_env = parent.frame(),
+    covariates = NULL,
+    verbose = TRUE
+) {
+    # -------------------------------------------------------------------------
+    # Validate the project and comparison specification
+    # -------------------------------------------------------------------------
+    if (!is.list(dat)) {
+        stop("dat must be a featurecounts_project object or compatible list.")
+    }
+    required_elements <- c("counts", "metadata", "genes")
+    missing_elements <- setdiff(required_elements, names(dat))
+    if (length(missing_elements) > 0L) {
+        stop("dat is missing: ", paste(missing_elements, collapse = ", "))
+    }
+    if (!is.matrix(dat$counts) || !is.numeric(dat$counts) ||
+        is.null(rownames(dat$counts)) || is.null(colnames(dat$counts))) {
+        stop("dat$counts must be a numeric matrix with gene and sample names.")
+    }
+    if (anyNA(dat$counts) || any(!is.finite(dat$counts)) || any(dat$counts < 0)) {
+        stop("dat$counts must contain finite, non-missing, non-negative values.")
+    }
+    if (anyDuplicated(rownames(dat$counts)) ||
+        anyDuplicated(colnames(dat$counts))) {
+        stop("dat$counts must have unique gene and sample names.")
+    }
+    if (!is.data.frame(dat$metadata) || is.null(rownames(dat$metadata))) {
+        stop("dat$metadata must be a data frame with sample row names.")
+    }
+    if (!is.data.frame(dat$genes) || is.null(rownames(dat$genes))) {
+        stop("dat$genes must be a data frame with gene row names.")
+    }
+    if (!identical(colnames(dat$counts), rownames(dat$metadata))) {
+        stop("dat$counts and dat$metadata are not in the same sample order.")
+    }
+    if (!identical(rownames(dat$counts), rownames(dat$genes))) {
+        stop("dat$counts and dat$genes are not in the same gene order.")
+    }
+
+    comparison_values <- list(
+        group_col = group_col,
+        group1 = group1,
+        group2 = group2
+    )
+    invalid_comparison <- vapply(
+        comparison_values,
+        function(x) !is.character(x) || length(x) != 1L || is.na(x) || x == "",
+        logical(1)
+    )
+    if (any(invalid_comparison)) {
+        stop(
+            "The following arguments must be non-empty character scalars: ",
+            paste(names(comparison_values)[invalid_comparison], collapse = ", ")
+        )
+    }
+    if (identical(group1, group2)) {
+        stop("group1 and group2 must be different.")
+    }
+    if (!group_col %in% colnames(dat$metadata)) {
+        stop("group_col '", group_col, "' was not found in metadata.")
+    }
+    if (!is.null(covariates)) {
+        if (!is.character(covariates) || anyNA(covariates) ||
+            any(covariates == "") || anyDuplicated(covariates)) {
+            stop("covariates must be NULL or unique, non-empty column names.")
+        }
+        if (group_col %in% covariates) {
+            stop("group_col must not also be listed in covariates.")
+        }
+    }
+    if (!is.environment(subset_env)) {
+        stop("subset_env must be an environment.")
+    }
+    if (!is.logical(verbose) || length(verbose) != 1L || is.na(verbose)) {
+        stop("verbose must be a non-missing logical scalar.")
+    }
+
+    counts <- dat$counts
+    metadata <- dat$metadata
+    genes <- dat$genes
+
+    # -------------------------------------------------------------------------
+    # Apply the optional metadata expression, then retain the requested pair
+    # -------------------------------------------------------------------------
+    if (is.null(subset_expr)) {
+        keep_subset <- rep(TRUE, nrow(metadata))
+    } else {
+        keep_subset <- eval(
+            subset_expr,
+            envir = metadata,
+            enclos = subset_env
+        )
+        if (!is.logical(keep_subset)) {
+            stop("subset must evaluate to a logical vector.")
+        }
+        if (length(keep_subset) != nrow(metadata)) {
+            stop(
+                "subset returned ",
+                length(keep_subset),
+                " values but metadata contains ",
+                nrow(metadata),
+                " samples."
+            )
+        }
+        keep_subset[is.na(keep_subset)] <- FALSE
+    }
+
+    keep_group <- as.character(metadata[[group_col]]) %in% c(group1, group2)
+    keep <- keep_subset & keep_group
+    if (!any(keep)) {
+        stop("No samples remain after metadata and group selection.")
+    }
+
+    selected_samples <- rownames(metadata)[keep]
+    metadata <- metadata[selected_samples, , drop = FALSE]
+    counts <- counts[, selected_samples, drop = FALSE]
+
+    # -------------------------------------------------------------------------
+    # Remove samples missing any model variable
+    # -------------------------------------------------------------------------
+    variables_needed <- c(group_col, covariates)
+    missing_variables <- setdiff(variables_needed, colnames(metadata))
+    if (length(missing_variables) > 0L) {
+        stop(
+            "Variables missing from metadata: ",
+            paste(missing_variables, collapse = ", ")
+        )
+    }
+
+    complete_samples <- complete.cases(
+        metadata[, variables_needed, drop = FALSE]
+    )
+    if (any(!complete_samples)) {
+        if (verbose) {
+            message(
+                "Removing ",
+                sum(!complete_samples),
+                " sample(s) with missing model metadata."
+            )
+        }
+        metadata <- metadata[complete_samples, , drop = FALSE]
+        counts <- counts[, rownames(metadata), drop = FALSE]
+    }
+
+    group_values <- as.character(metadata[[group_col]])
+    n_group1 <- sum(group_values == group1)
+    n_group2 <- sum(group_values == group2)
+    if (n_group1 == 0L) {
+        stop("No complete samples were found for group1: ", group1)
+    }
+    if (n_group2 == 0L) {
+        stop("No complete samples were found for group2: ", group2)
+    }
+    if (n_group1 < 2L || n_group2 < 2L) {
+        warning(
+            "One group contains fewer than two biological samples; ",
+            "differential-expression inference may not be reliable."
+        )
+    }
+
+    # -------------------------------------------------------------------------
+    # Build a no-intercept group design and optional covariate columns
+    # -------------------------------------------------------------------------
+    group <- factor(group_values, levels = c(group1, group2))
+    design_group <- cbind(
+        G1 = as.numeric(group == group1),
+        G2 = as.numeric(group == group2)
+    )
+    design <- design_group
+
+    if (!is.null(covariates) && length(covariates) > 0L) {
+        covariate_data <- droplevels(
+            metadata[, covariates, drop = FALSE]
+        )
+        no_variation <- vapply(
+            covariate_data,
+            function(x) length(unique(x[!is.na(x)])) <= 1L,
+            logical(1)
+        )
+        if (any(no_variation)) {
+            stop(
+                "These covariates have no variation within selected samples: ",
+                paste(names(no_variation)[no_variation], collapse = ", ")
+            )
+        }
+
+        covariate_design <- model.matrix(~ ., data = covariate_data)
+        if ("(Intercept)" %in% colnames(covariate_design)) {
+            covariate_design <- covariate_design[
+                ,
+                colnames(covariate_design) != "(Intercept)",
+                drop = FALSE
+            ]
+        }
+        reserved_columns <- intersect(
+            colnames(covariate_design),
+            colnames(design_group)
+        )
+        if (length(reserved_columns) > 0L) {
+            stop(
+                "Covariate design uses reserved columns: ",
+                paste(reserved_columns, collapse = ", ")
+            )
+        }
+        design <- cbind(design_group, covariate_design)
+    }
+
+    rownames(design) <- rownames(metadata)
+    if (qr(design)$rank < ncol(design)) {
+        stop(
+            "Design matrix is not full rank. Check whether group and ",
+            "covariates are confounded."
+        )
+    }
+
+    contrast <- stats::setNames(rep(0, ncol(design)), colnames(design))
+    contrast["G1"] <- -1
+    contrast["G2"] <- 1
+    genes <- genes[rownames(counts), , drop = FALSE]
+
+    if (verbose) {
+        message("")
+        message("Comparison: ", group2, " vs ", group1)
+        message(group1, ": n = ", n_group1)
+        message(group2, ": n = ", n_group2)
+        if (!is.null(covariates) && length(covariates) > 0L) {
+            message("Covariates: ", paste(covariates, collapse = ", "))
+        }
+    }
+
+    list(
+        counts = counts,
+        metadata = metadata,
+        genes = genes,
+        group = group,
+        design = design,
+        contrast = contrast,
+        n_group1 = n_group1,
+        n_group2 = n_group2,
+        group1 = group1,
+        group2 = group2,
+        group_col = group_col
+    )
+}
+
+
+#' Run a pairwise edgeR quasi-likelihood analysis
+#'
+#' Select two biological groups, optionally restrict samples and adjust for
+#' covariates, filter genes for that comparison, apply TMM normalization, fit
+#' an edgeR quasi-likelihood model, and return an annotated ranked table. The
+#' contrast is always `group2 - group1`, so positive `logFC` means higher
+#' expression in `group2`.
+#'
+#' @param dat A `featurecounts_project` or compatible list containing raw
+#'   gene-by-sample counts, aligned sample metadata, and aligned gene
+#'   annotation. Counts must be finite, non-missing, and non-negative.
+#' @param group_col Character scalar naming the metadata grouping column.
+#' @param group1 Character scalar naming the reference group.
+#' @param group2 Character scalar naming the comparison group.
+#' @param subset `NULL` or an unquoted metadata expression used to restrict
+#'   samples before retaining `group1` and `group2`. Missing expression results
+#'   are treated as `FALSE`.
+#' @param covariates `NULL` or a character vector naming additional metadata
+#'   variables in the design. Incomplete samples are removed and the final
+#'   design must be full rank.
+#' @param robust Logical scalar passed to [edgeR::estimateDisp()] and
+#'   [edgeR::glmQLFit()] for robust empirical Bayes estimation.
+#' @param fdr_cutoff Numeric scalar in `[0, 1]` used with `logfc_cutoff` to label
+#'   genes in the returned `Direction` column. It does not remove result rows.
+#' @param logfc_cutoff Non-negative numeric scalar giving the absolute log2-fold
+#'   change required for a directional label. When zero, only strictly positive
+#'   or negative significant effects receive directional labels.
+#' @param verbose Logical scalar. Whether to print sample counts, filtering
+#'   totals, covariates, and significant-gene summaries.
+#'
+#' @return A named list containing `method`, comparison label, annotated
+#'   `results`, filtered and normalized `dge`, fitted `fit`, quasi-likelihood
+#'   `test`, `design`, numeric `contrast`, selected `metadata`, the original
+#'   gene-length `keep_genes` filter, group names, and group sample counts.
+#'
+#' @details
+#' Expression filtering is performed with [edgeR::filterByExpr()] only after
+#' the requested samples and model have been selected. Existing `group`,
+#' `lib.size`, and `norm.factors` metadata columns are excluded when constructing
+#' the DGEList, and the prepared comparison factor is stored as its group.
+#' Annotation fields that conflict with fitted statistic names receive an
+#' `annotation_` prefix so fitted statistics remain authoritative. Genes are
+#' labelled `Up_<group2>`, `Up_<group1>`, or `NS`; the complete ranked table is
+#' retained. Replication, batch adjustment, pairing variables, and other
+#' covariates must reflect the study design. A warning is issued when a group
+#' contains fewer than two samples.
+#'
+#' @examples
+#' \dontrun{
+#' result <- edgeR_pairwise(
+#'   project,
+#'   group_col = "Genotype",
+#'   group1 = "WT",
+#'   group2 = "cKO",
+#'   subset = Tissue == "Lung",
+#'   covariates = "Batch"
+#' )
+#'
+#' head(result$results)
+#' }
+#'
+#' @export
+edgeR_pairwise <- function(
+    dat,
+    group_col,
+    group1,
+    group2,
+    subset = NULL,
+    covariates = NULL,
+    robust = TRUE,
+    fdr_cutoff = 0.05,
+    logfc_cutoff = 0,
+    verbose = TRUE
+) {
+    if (!requireNamespace("edgeR", quietly = TRUE)) {
+        stop("edgeR is required.")
+    }
+
+    logical_arguments <- list(robust = robust, verbose = verbose)
+    invalid_logical <- vapply(
+        logical_arguments,
+        function(x) length(x) != 1L || is.na(x) || !is.logical(x),
+        logical(1)
+    )
+    if (any(invalid_logical)) {
+        stop(
+            "The following arguments must be non-missing logical scalars: ",
+            paste(names(logical_arguments)[invalid_logical], collapse = ", ")
+        )
+    }
+    if (!is.numeric(fdr_cutoff) || length(fdr_cutoff) != 1L ||
+        is.na(fdr_cutoff) || !is.finite(fdr_cutoff) ||
+        fdr_cutoff < 0 || fdr_cutoff > 1) {
+        stop("fdr_cutoff must be a finite numeric scalar between zero and one.")
+    }
+    if (!is.numeric(logfc_cutoff) || length(logfc_cutoff) != 1L ||
+        is.na(logfc_cutoff) || !is.finite(logfc_cutoff) || logfc_cutoff < 0) {
+        stop("logfc_cutoff must be a finite, non-negative numeric scalar.")
+    }
+
+    subset_expression <- substitute(subset)
+    if (identical(subset_expression, quote(NULL))) {
+        subset_expression <- NULL
+    }
+    prep <- .prepare_pairwise_dat(
+        dat = dat,
+        group_col = group_col,
+        group1 = group1,
+        group2 = group2,
+        subset_expr = subset_expression,
+        subset_env = parent.frame(),
+        covariates = covariates,
+        verbose = verbose
+    )
+
+    dge_samples <- prep$metadata[
+        ,
+        setdiff(
+            colnames(prep$metadata),
+            c("group", "lib.size", "norm.factors")
+        ),
+        drop = FALSE
+    ]
+    dge <- edgeR::DGEList(
+        counts = prep$counts,
+        samples = dge_samples,
+        group = prep$group,
+        genes = prep$genes
+    )
+    n_genes_before <- nrow(dge)
+
+    keep <- edgeR::filterByExpr(dge, design = prep$design)
+    if (!any(keep)) {
+        stop("No genes passed edgeR::filterByExpr for this comparison.")
+    }
+    dge <- dge[keep, , keep.lib.sizes = FALSE]
+    n_genes_after <- nrow(dge)
+    dge <- edgeR::calcNormFactors(dge, method = "TMM")
+    dge <- edgeR::estimateDisp(
+        dge,
+        design = prep$design,
+        robust = robust
+    )
+    fit <- edgeR::glmQLFit(
+        dge,
+        design = prep$design,
+        robust = robust
+    )
+    test <- edgeR::glmQLFTest(fit, contrast = prep$contrast)
+    table <- edgeR::topTags(test, n = Inf, sort.by = "PValue")$table
+
+    statistic_columns <- c("logFC", "logCPM", "F", "PValue", "FDR")
+    missing_statistics <- setdiff(statistic_columns, colnames(table))
+    if (length(missing_statistics) > 0L) {
+        stop(
+            "edgeR result is missing expected statistics: ",
+            paste(missing_statistics, collapse = ", ")
+        )
+    }
+    statistics <- table[, statistic_columns, drop = FALSE]
+    gene_annotation <- prep$genes[rownames(statistics), , drop = FALSE]
+    annotation_names <- colnames(gene_annotation)
+    conflicting_annotation <- annotation_names %in%
+        c(statistic_columns, "Direction")
+    annotation_names[conflicting_annotation] <- paste0(
+        "annotation_",
+        annotation_names[conflicting_annotation]
+    )
+    colnames(gene_annotation) <- make.unique(annotation_names)
+    results <- cbind(gene_annotation, statistics)
+
+    results$Direction <- "NS"
+    significant <- !is.na(results$FDR) & results$FDR < fdr_cutoff
+    if (logfc_cutoff == 0) {
+        up_group2 <- significant & !is.na(results$logFC) & results$logFC > 0
+        up_group1 <- significant & !is.na(results$logFC) & results$logFC < 0
+    } else {
+        up_group2 <- significant &
+            !is.na(results$logFC) & results$logFC >= logfc_cutoff
+        up_group1 <- significant &
+            !is.na(results$logFC) & results$logFC <= -logfc_cutoff
+    }
+    results$Direction[which(up_group2)] <- paste0("Up_", prep$group2)
+    results$Direction[which(up_group1)] <- paste0("Up_", prep$group1)
+
+    if (verbose) {
+        message("")
+        message("edgeR QL analysis complete")
+        message("Genes before filtering: ", n_genes_before)
+        message("Genes after filtering:  ", n_genes_after)
+        message("FDR < ", fdr_cutoff, ": ", sum(significant))
+        message(
+            prep$group2,
+            " up: ",
+            sum(results$Direction == paste0("Up_", prep$group2))
+        )
+        message(
+            prep$group1,
+            " up: ",
+            sum(results$Direction == paste0("Up_", prep$group1))
+        )
+    }
+
+    list(
+        method = "edgeR_QL",
+        comparison = paste0(prep$group2, "_vs_", prep$group1),
+        results = results,
+        dge = dge,
+        fit = fit,
+        test = test,
+        design = prep$design,
+        contrast = prep$contrast,
+        metadata = prep$metadata,
+        keep_genes = keep,
+        group1 = prep$group1,
+        group2 = prep$group2,
+        n_group1 = prep$n_group1,
+        n_group2 = prep$n_group2
+    )
+}
+
+
+#' Run a pairwise limma-voom differential-expression analysis
+#'
+#' Select two biological groups, optionally restrict samples and adjust for
+#' covariates, filter genes, apply TMM normalization and voom precision weights,
+#' fit a limma model, and return an annotated ranked table. The contrast is
+#' always `group2 - group1`, so positive `logFC` means higher expression in
+#' `group2`.
+#'
+#' @inheritParams edgeR_pairwise
+#' @param robust Logical scalar passed to [limma::eBayes()] for robust
+#'   empirical Bayes estimation.
+#' @param trend Logical scalar passed to [limma::eBayes()] to enable an
+#'   intensity-dependent prior trend after voom.
+#' @param voom_plot Logical scalar. Whether [limma::voom()] draws its
+#'   mean-variance trend plot on the active graphics device.
+#'
+#' @return A named list containing `method`, comparison label, annotated
+#'   `results`, filtered and normalized `dge`, voom object `voom`, empirical
+#'   Bayes model `fit`, `design`, named contrast matrix, selected `metadata`, the
+#'   original gene-length `keep_genes` filter, group names, and sample counts.
+#'
+#' @details
+#' Genes are filtered with [edgeR::filterByExpr()] after sample selection, then
+#' normalized with TMM before [limma::voom()]. Existing `group`, `lib.size`, and
+#' `norm.factors` metadata fields are excluded from DGEList construction, and
+#' the prepared comparison factor is stored as its group. Annotation fields
+#' that conflict with fitted statistic names receive an `annotation_` prefix.
+#' `adj.P.Val` is retained and copied to the standardized `FDR` result column.
+#' Direction labels use the same thresholds and interpretation as
+#' [edgeR_pairwise()]. Robust empirical Bayes estimation may require the
+#' `statmod` package through limma.
+#'
+#' @examples
+#' \dontrun{
+#' result <- limma_voom_pairwise(
+#'   project,
+#'   group_col = "Genotype",
+#'   group1 = "WT",
+#'   group2 = "cKO",
+#'   subset = Tissue == "Lung",
+#'   covariates = "Batch"
+#' )
+#'
+#' head(result$results)
+#' }
+#'
+#' @export
+limma_voom_pairwise <- function(
+    dat,
+    group_col,
+    group1,
+    group2,
+    subset = NULL,
+    covariates = NULL,
+    robust = TRUE,
+    trend = FALSE,
+    voom_plot = FALSE,
+    fdr_cutoff = 0.05,
+    logfc_cutoff = 0,
+    verbose = TRUE
+) {
+    if (!requireNamespace("edgeR", quietly = TRUE)) {
+        stop("edgeR is required for DGEList construction, filtering, and TMM.")
+    }
+    if (!requireNamespace("limma", quietly = TRUE)) {
+        stop("limma is required.")
+    }
+
+    logical_arguments <- list(
+        robust = robust,
+        trend = trend,
+        voom_plot = voom_plot,
+        verbose = verbose
+    )
+    invalid_logical <- vapply(
+        logical_arguments,
+        function(x) length(x) != 1L || is.na(x) || !is.logical(x),
+        logical(1)
+    )
+    if (any(invalid_logical)) {
+        stop(
+            "The following arguments must be non-missing logical scalars: ",
+            paste(names(logical_arguments)[invalid_logical], collapse = ", ")
+        )
+    }
+    if (!is.numeric(fdr_cutoff) || length(fdr_cutoff) != 1L ||
+        is.na(fdr_cutoff) || !is.finite(fdr_cutoff) ||
+        fdr_cutoff < 0 || fdr_cutoff > 1) {
+        stop("fdr_cutoff must be a finite numeric scalar between zero and one.")
+    }
+    if (!is.numeric(logfc_cutoff) || length(logfc_cutoff) != 1L ||
+        is.na(logfc_cutoff) || !is.finite(logfc_cutoff) || logfc_cutoff < 0) {
+        stop("logfc_cutoff must be a finite, non-negative numeric scalar.")
+    }
+
+    subset_expression <- substitute(subset)
+    if (identical(subset_expression, quote(NULL))) {
+        subset_expression <- NULL
+    }
+    prep <- .prepare_pairwise_dat(
+        dat = dat,
+        group_col = group_col,
+        group1 = group1,
+        group2 = group2,
+        subset_expr = subset_expression,
+        subset_env = parent.frame(),
+        covariates = covariates,
+        verbose = verbose
+    )
+
+    dge_samples <- prep$metadata[
+        ,
+        setdiff(
+            colnames(prep$metadata),
+            c("group", "lib.size", "norm.factors")
+        ),
+        drop = FALSE
+    ]
+    dge <- edgeR::DGEList(
+        counts = prep$counts,
+        samples = dge_samples,
+        group = prep$group,
+        genes = prep$genes
+    )
+    n_genes_before <- nrow(dge)
+
+    keep <- edgeR::filterByExpr(dge, design = prep$design)
+    if (!any(keep)) {
+        stop("No genes passed edgeR::filterByExpr for this comparison.")
+    }
+    dge <- dge[keep, , keep.lib.sizes = FALSE]
+    n_genes_after <- nrow(dge)
+    dge <- edgeR::calcNormFactors(dge, method = "TMM")
+    voom <- limma::voom(dge, design = prep$design, plot = voom_plot)
+    fit <- limma::lmFit(voom, prep$design)
+
+    comparison <- paste0(prep$group2, "_vs_", prep$group1)
+    contrast_matrix <- matrix(
+        prep$contrast,
+        ncol = 1L,
+        dimnames = list(colnames(prep$design), comparison)
+    )
+    fit <- limma::contrasts.fit(fit, contrasts = contrast_matrix)
+    fit <- limma::eBayes(fit, robust = robust, trend = trend)
+    table <- limma::topTable(fit, coef = 1L, number = Inf, sort.by = "P")
+
+    statistic_columns <- c(
+        "logFC",
+        "AveExpr",
+        "t",
+        "P.Value",
+        "adj.P.Val",
+        "B"
+    )
+    missing_statistics <- setdiff(statistic_columns, colnames(table))
+    if (length(missing_statistics) > 0L) {
+        stop(
+            "limma result is missing expected statistics: ",
+            paste(missing_statistics, collapse = ", ")
+        )
+    }
+    statistics <- table[, statistic_columns, drop = FALSE]
+    gene_annotation <- prep$genes[rownames(statistics), , drop = FALSE]
+    annotation_names <- colnames(gene_annotation)
+    conflicting_annotation <- annotation_names %in%
+        c(statistic_columns, "FDR", "Direction")
+    annotation_names[conflicting_annotation] <- paste0(
+        "annotation_",
+        annotation_names[conflicting_annotation]
+    )
+    colnames(gene_annotation) <- make.unique(annotation_names)
+    results <- cbind(gene_annotation, statistics)
+    results$FDR <- results$adj.P.Val
+    results$Direction <- "NS"
+
+    significant <- !is.na(results$FDR) & results$FDR < fdr_cutoff
+    if (logfc_cutoff == 0) {
+        up_group2 <- significant & !is.na(results$logFC) & results$logFC > 0
+        up_group1 <- significant & !is.na(results$logFC) & results$logFC < 0
+    } else {
+        up_group2 <- significant &
+            !is.na(results$logFC) & results$logFC >= logfc_cutoff
+        up_group1 <- significant &
+            !is.na(results$logFC) & results$logFC <= -logfc_cutoff
+    }
+    results$Direction[which(up_group2)] <- paste0("Up_", prep$group2)
+    results$Direction[which(up_group1)] <- paste0("Up_", prep$group1)
+
+    if (verbose) {
+        message("")
+        message("limma-voom analysis complete")
+        message("Genes before filtering: ", n_genes_before)
+        message("Genes after filtering:  ", n_genes_after)
+        message("FDR < ", fdr_cutoff, ": ", sum(significant))
+        message(
+            prep$group2,
+            " up: ",
+            sum(results$Direction == paste0("Up_", prep$group2))
+        )
+        message(
+            prep$group1,
+            " up: ",
+            sum(results$Direction == paste0("Up_", prep$group1))
+        )
+    }
+
+    list(
+        method = "limma_voom",
+        comparison = comparison,
+        results = results,
+        dge = dge,
+        voom = voom,
+        fit = fit,
+        design = prep$design,
+        contrast = contrast_matrix,
+        metadata = prep$metadata,
+        keep_genes = keep,
+        group1 = prep$group1,
+        group2 = prep$group2,
+        n_group1 = prep$n_group1,
+        n_group2 = prep$n_group2
+    )
+}
+
+
+# =============================================================================
 # Normalization and feature selection
 # =============================================================================
 

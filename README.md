@@ -289,6 +289,8 @@ and visualization and export.
 | Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
 | Bulk/pseudobulk structural QC | `check_featurecounts_project()` | Audits ordering, identifier uniqueness, invalid count values, integer-likeness, and assignment-rate summaries. | An invisible structured audit containing overall flags, individual checks, and assignment summary. |
 | Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
+| Pairwise differential expression | `edgeR_pairwise()` | Runs comparison-specific filtering, TMM normalization, dispersion estimation, and an edgeR quasi-likelihood test. | Annotated results plus DGEList, fit, test, design, contrast, and sample details. |
+| Pairwise differential expression | `limma_voom_pairwise()` | Runs comparison-specific filtering, TMM normalization, voom weighting, and a limma empirical Bayes test. | Annotated results plus DGEList, voom data, fit, design, contrast, and sample details. |
 
 ### `read_featurecounts_project(...)`
 
@@ -385,6 +387,72 @@ and the function stops if no samples remain. Existing `lib.size` and
 `norm.factors` metadata fields are excluded from DGEList construction so edgeR
 recalculates them from the subset counts; the returned metadata itself is left
 unchanged.
+
+### Pairwise differential expression
+
+Both pairwise functions use the same validated sample-selection and design
+helper. `group1` is always the reference and the fitted contrast is always
+`group2 - group1`; therefore, a positive `logFC` means higher expression in
+`group2`. Optional covariates are included in the model, incomplete model rows
+are removed, and rank-deficient designs stop with an error.
+
+#### `edgeR_pairwise(...)`
+
+```r
+edger_result <- edgeR_pairwise(
+  project,
+  group_col = "Genotype",
+  group1 = "WT",
+  group2 = "cKO",
+  subset = Tissue == "Lung",
+  covariates = "Batch",
+  robust = TRUE,
+  fdr_cutoff = 0.05,
+  logfc_cutoff = 1
+)
+
+head(edger_result$results)
+```
+
+This workflow uses `edgeR::filterByExpr()` after selecting the comparison,
+followed by TMM normalization, robust dispersion estimation, quasi-likelihood
+fitting, and a quasi-likelihood F-test.
+
+#### `limma_voom_pairwise(...)`
+
+```r
+voom_result <- limma_voom_pairwise(
+  project,
+  group_col = "Genotype",
+  group1 = "WT",
+  group2 = "cKO",
+  subset = Tissue == "Lung",
+  covariates = "Batch",
+  robust = TRUE,
+  voom_plot = TRUE
+)
+
+head(voom_result$results)
+```
+
+This workflow performs the same comparison-specific gene filtering and TMM
+normalization, then applies limma-voom precision weights, the requested
+contrast, and empirical Bayes moderation. The results retain `adj.P.Val` and
+also expose it as `FDR` for consistency with edgeR.
+
+Both functions return every tested gene with annotation, effect size,
+significance statistics, and a `Direction` label. Direction thresholds label
+results but do not remove rows. Fitted statistics take precedence when an
+annotation field has the same name; conflicting annotations are retained with
+an `annotation_` prefix. The returned DGEList stores the selected comparison
+factor explicitly. These workflows require raw counts and biological
+replication. Pairing, donor effects, batch variables, and other covariates must
+be specified according to the study design; one group with fewer than two
+samples triggers a warning because inference is unreliable.
+
+Dependencies are edgeR for `edgeR_pairwise()` and edgeR plus limma for
+`limma_voom_pairwise()`. Robust limma empirical Bayes estimation may also use
+statmod through limma.
 
 When another R function is supplied, it will be added to the appropriate
 section in the R pipeline, documented with complete Roxygen comments for inputs

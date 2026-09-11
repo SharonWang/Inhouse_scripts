@@ -4,6 +4,48 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-09-12
+
+### Added
+
+- Added the internal `.prepare_pairwise_dat()` R helper to centralize metadata
+  subsetting, complete-case handling, replicate summaries, covariate design,
+  rank validation, and the explicit `group2 - group1` contrast.
+- Added `edgeR_pairwise()` for comparison-specific expression filtering, TMM
+  normalization, robust dispersion estimation, quasi-likelihood fitting, and
+  annotated pairwise results.
+- Added `limma_voom_pairwise()` for comparison-specific filtering and TMM,
+  voom precision weighting, empirical Bayes fitting, and annotated pairwise
+  results with a standardized `FDR` column.
+
+### Changed
+
+- Captured pairwise metadata subset expressions together with their calling
+  environments, preventing forwarded expressions from losing access to
+  metadata columns or caller-defined values.
+- Documented and enforced a consistent effect direction: positive `logFC`
+  always means higher expression in `group2` relative to `group1`.
+- Added cutoff, model-variable, count-integrity, replication, empty-filter, and
+  full-rank design safeguards for both pairwise workflows.
+- Ensured fitted DE statistics remain authoritative by renaming conflicting
+  gene-annotation fields with an `annotation_` prefix.
+- Stored the prepared comparison factor explicitly in returned DGEList objects
+  and excluded stale or unrelated metadata `group` fields from construction.
+
+### Verification
+
+- Automated tests were not added or run, following the user's standing
+  instruction.
+- Reviewed the shared design preparation, contrast direction, edgeR and
+  limma-voom flows, returned objects, documentation, and Git diff before
+  committing.
+
+### Commit
+
+- `feat: add pairwise edgeR and limma-voom workflows` — Added shared design
+  preparation, two documented pairwise DE methods, validation safeguards, and
+  README usage guidance.
+
 ## 2026-09-11
 
 ### Added
