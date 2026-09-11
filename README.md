@@ -277,15 +277,61 @@ and added to this table for future studies.
 
 Source: [`R/scRNAseq_preprocessing.R`](R/scRNAseq_preprocessing.R)
 
-There are currently no reusable R functions in the pipeline. The file contains
-a structured scaffold for data loading, QC and filtering, normalization and
-feature selection, dimensionality reduction and clustering, and visualization
-and export.
+The R pipeline currently contains one reusable import function. The file also
+contains structured sections for cell-level data loading, QC and filtering,
+normalization and feature selection, dimensionality reduction and clustering,
+and visualization and export.
 
-When an R function is supplied, it will be added to the appropriate section in
-the R pipeline, documented with complete Roxygen comments for inputs and return
-values, and listed here with a usage example. Python functions are not
-automatically translated into R, and R functions are not automatically
+### Function summary
+
+| Workflow stage | Function | What it does | Main return value(s) |
+|---|---|---|---|
+| Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
+
+### `read_featurecounts_project(...)`
+
+Reads a featureCounts gene-level count table and validates the relationship
+between its sample columns and a supplied metadata table. Metadata can be a
+data frame or a CSV, TSV/TXT, or Excel file. The function can also import a
+featureCounts summary, merge an external gene-feature annotation, remove
+terminal Ensembl version suffixes, and create an `edgeR::DGEList` when edgeR is
+installed.
+
+```r
+source("R/scRNAseq_preprocessing.R")
+
+project <- read_featurecounts_project(
+  fcounts_file = "counts/featureCounts.txt",
+  summary_file = "counts/featureCounts.txt.summary",
+  gene_feature_file = "reference/gene_features.txt",
+  metadata = "metadata/samples.csv",
+  sample_col = "SampleName",
+  strict = TRUE,
+  make_dge = TRUE
+)
+
+project$counts
+project$metadata
+project$qc
+project$dge
+```
+
+The returned count matrix, metadata, gene annotation, and QC table are ordered
+and checked explicitly. With `strict=TRUE`, the featureCounts and metadata
+sample sets must match exactly; `strict=FALSE` retains their intersection in
+count-matrix order. Excel metadata requires `readxl`, while DGEList creation
+requires edgeR.
+
+This function is intended for bulk RNA-seq or sample-level pseudobulk counts,
+not a cell-by-gene single-cell matrix. It performs import and structural QC but
+does not choose expression filters, normalize libraries, construct a design,
+or run differential-expression tests. Those steps must account for biological
+replication and the study design.
+
+When another R function is supplied, it will be added to the appropriate
+section in the R pipeline, documented with complete Roxygen comments for inputs
+and return values, and listed here with a usage example. Python functions are
+not automatically translated into R, and R functions are not automatically
 translated into Python.
 
 ## Maintenance convention
