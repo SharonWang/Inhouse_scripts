@@ -35,6 +35,11 @@ preprocessing pipelines. All project files are maintained under
 - Preserved the supplied human-readable audit while adding an invisible,
   structured result with overall and individual check outcomes for reuse in
   automated workflows.
+- Added `subset_featurecounts_project()` to the R project-manipulation section
+  for selecting samples with metadata expressions while synchronizing counts,
+  annotations, QC, and featureCounts summary data.
+- Rebuilds an optional edgeR `DGEList` for the selected samples while retaining
+  every gene for later design-aware expression filtering.
 
 ### Changed
 
@@ -53,6 +58,14 @@ preprocessing pipelines. All project files are maintained under
   counts, since fractional featureCounts output can be intentional.
 - Added an explicit finite-count check so infinite values cannot be omitted
   from aggregate audit results or incorrectly reported as valid.
+- Added incoming and outgoing ordering checks plus complete-summary coverage
+  validation to prevent silently misaligned featureCounts subsets.
+- Rejected duplicate identifiers before name-based subsetting and preserved
+  original featureCounts sample-name provenance in selected-sample order.
+- Aligned `read_featurecounts_project()` original sample names to retained
+  samples so projects imported with `strict=FALSE` remain subset-compatible.
+- Prevented stale edgeR `lib.size` and `norm.factors` metadata fields from
+  overriding values recalculated for a newly subsetted `DGEList`.
 
 ### Verification
 
@@ -72,6 +85,9 @@ preprocessing pipelines. All project files are maintained under
   corresponding README documentation.
 - `feat: add featureCounts project checker` — Added reusable structural and
   count-value auditing with printed and programmatic results.
+- `feat: add featureCounts project subsetting` — Added metadata-driven sample
+  selection, synchronized project components, optional edgeR rebuilding, and
+  README documentation.
 
 ## 2026-09-07
 

@@ -288,6 +288,7 @@ and visualization and export.
 |---|---|---|---|
 | Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
 | Bulk/pseudobulk structural QC | `check_featurecounts_project()` | Audits ordering, identifier uniqueness, invalid count values, integer-likeness, and assignment-rate summaries. | An invisible structured audit containing overall flags, individual checks, and assignment summary. |
+| Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
 
 ### `read_featurecounts_project(...)`
 
@@ -321,7 +322,8 @@ The returned count matrix, metadata, gene annotation, and QC table are ordered
 and checked explicitly. With `strict=TRUE`, the featureCounts and metadata
 sample sets must match exactly; `strict=FALSE` retains their intersection in
 count-matrix order. Excel metadata requires `readxl`, while DGEList creation
-requires edgeR.
+requires edgeR. Original featureCounts sample names are retained in the same
+order as the final cleaned sample names.
 
 This function is intended for bulk RNA-seq or sample-level pseudobulk counts,
 not a cell-by-gene single-cell matrix. It performs import and structural QC but
@@ -353,6 +355,36 @@ structural and value integrity without requiring integer-like counts;
 `audit$all_checks_pass` includes the integer-likeness result. When
 `Assignment_percent` is present in the metadata, its summary is printed and
 returned.
+
+### `subset_featurecounts_project(...)`
+
+Creates a new featureCounts project from samples selected by an unquoted
+metadata expression. The input project is not modified, and every gene is
+retained so comparison-specific expression filtering can be applied later.
+
+```r
+lung_project <- subset_featurecounts_project(
+  project,
+  Tissue == "Lung" & Genotype %in% c("WT", "EPX"),
+  make_dge = TRUE,
+  drop_levels = TRUE
+)
+
+lung_project$sample_names
+lung_project$counts
+lung_project$dge
+```
+
+The function validates the incoming and outgoing count, metadata, gene, and QC
+ordering. It also subsets the featureCounts summary when available and creates
+a fresh edgeR `DGEList` so library information reflects only the selected
+samples. Duplicate sample or gene identifiers are rejected before name-based
+indexing, and original featureCounts sample names are retained in selected
+sample order. Missing values in the subset expression are treated as `FALSE`,
+and the function stops if no samples remain. Existing `lib.size` and
+`norm.factors` metadata fields are excluded from DGEList construction so edgeR
+recalculates them from the subset counts; the returned metadata itself is left
+unchanged.
 
 When another R function is supplied, it will be added to the appropriate
 section in the R pipeline, documented with complete Roxygen comments for inputs

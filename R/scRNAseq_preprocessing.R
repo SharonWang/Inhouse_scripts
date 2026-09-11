@@ -78,8 +78,8 @@ NULL
 #'     \item{featurecounts_summary}{Imported featureCounts summary data frame,
 #'       or `NULL`.}
 #'     \item{dge}{Optional [edgeR::DGEList()] object, or `NULL`.}
-#'     \item{original_sample_names}{Sample column names as read from the
-#'       featureCounts count file.}
+#'     \item{original_sample_names}{Original featureCounts sample column names
+#'       for retained samples, aligned to `sample_names`.}
 #'     \item{sample_names}{Cleaned sample names retained in the final object.}
 #'   }
 #'
@@ -325,10 +325,15 @@ read_featurecounts_project <- function(
     }
 
     original_sample_names <- colnames(counts)
-    colnames(counts) <- clean_sample_names(
+    cleaned_sample_names <- clean_sample_names(
         original_sample_names,
         "featureCounts"
     )
+    original_names_by_cleaned <- stats::setNames(
+        original_sample_names,
+        cleaned_sample_names
+    )
+    colnames(counts) <- cleaned_sample_names
 
     # -------------------------------------------------------------------------
     # Read metadata and align shared samples in count-matrix order
@@ -391,6 +396,9 @@ read_featurecounts_project <- function(
         stop("No matching samples between featureCounts and metadata.")
     }
     counts <- counts[, common_samples, drop = FALSE]
+    retained_original_sample_names <- unname(
+        original_names_by_cleaned[colnames(counts)]
+    )
     metadata_table <- metadata_table[
         match(colnames(counts), metadata_table[[sample_col]]),
         ,
@@ -614,7 +622,7 @@ read_featurecounts_project <- function(
         qc = qc,
         featurecounts_summary = featurecounts_summary,
         dge = dge,
-        original_sample_names = original_sample_names,
+        original_sample_names = retained_original_sample_names,
         sample_names = colnames(counts)
     )
     class(result) <- c("featurecounts_project", "list")
@@ -906,6 +914,326 @@ check_featurecounts_project <- function(
         assignment_summary = assignment_summary
     )
     invisible(result)
+}
+
+
+# =============================================================================
+# Project subsetting and manipulation
+# =============================================================================
+
+
+#' Subset a featureCounts project using sample metadata
+#'
+#' Select samples from a `featurecounts_project` with an expression evaluated
+#' against its metadata, then subset the count matrix, metadata, optional QC,
+#' and optional featureCounts summary in a synchronized order. All genes are
+#' retained, and a new [edgeR::DGEList()] can be constructed for the selected
+#' comparison.
+#'
+#' @param dat A `featurecounts_project` object, or a compatible list containing
+#'   `counts`, `metadata`, and `genes`, with optional `qc` and
+#'   `featurecounts_summary` elements. Count-matrix columns and metadata row
+#'   names must be identical; count-matrix and gene-annotation row names must
+#'   also be identical.
+#' @param subset An unquoted expression evaluated in `dat$metadata` that returns
+#'   one logical value per sample. For example,
+#'   `Tissue == "Lung" & Genotype %in% c("WT", "EPX")`. Values from the
+#'   calling environment may also be referenced. Missing results are treated as
+#'   `FALSE`.
+#' @param make_dge Logical scalar. Whether to build a new [edgeR::DGEList()]
+#'   from the subset. Rebuilding rather than subsetting an existing DGEList
+#'   resets its library information for the selected comparison. If edgeR is
+#'   unavailable, a warning is issued and the returned `dge` is `NULL`.
+#' @param drop_levels Logical scalar. Whether to remove unused levels from every
+#'   factor column in the subset metadata.
+#' @param verbose Logical scalar. Whether to print retained sample and gene
+#'   counts together with the selected sample identifiers.
+#'
+#' @return A new object of class `featurecounts_project`, implemented as a
+#'   named list with the following elements:
+#'   \describe{
+#'     \item{counts}{Gene-by-sample count matrix containing only selected
+#'       samples and all input genes.}
+#'     \item{metadata}{Selected sample metadata in count-matrix column order.}
+#'     \item{genes}{Unfiltered gene annotation in count-matrix row order.}
+#'     \item{qc}{Selected sample QC in count-matrix column order, or `NULL`.}
+#'     \item{featurecounts_summary}{FeatureCounts status table restricted to
+#'       selected sample columns, or `NULL`.}
+#'     \item{dge}{New optional [edgeR::DGEList()] for the subset, or `NULL`.}
+#'     \item{original_sample_names}{Original featureCounts sample column names
+#'       for selected samples in `sample_names` order, or `NULL` when the input
+#'       compatible list does not provide this provenance.}
+#'     \item{sample_names}{Character vector of retained sample identifiers in
+#'       count-matrix order.}
+#'   }
+#'
+#' @details
+#' This function does not filter genes. Retaining the complete gene set allows
+#' expression filtering, such as [edgeR::filterByExpr()], to be performed later
+#' for the specific design and comparison. The input object is not modified.
+#'
+#' @examples
+#' \dontrun{
+#' lung_project <- subset_featurecounts_project(
+#'   project,
+#'   Tissue == "Lung" & Genotype %in% c("WT", "EPX")
+#' )
+#'
+#' lung_project$sample_names
+#' lung_project$dge
+#' }
+#'
+#' @export
+subset_featurecounts_project <- function(
+    dat,
+    subset,
+    make_dge = TRUE,
+    drop_levels = TRUE,
+    verbose = TRUE
+) {
+    # -------------------------------------------------------------------------
+    # Validate the project components and their incoming order
+    # -------------------------------------------------------------------------
+    if (!is.list(dat)) {
+        stop("dat must be a featurecounts_project object or compatible list.")
+    }
+
+    required_elements <- c("counts", "metadata", "genes")
+    missing_elements <- setdiff(required_elements, names(dat))
+    if (length(missing_elements) > 0L) {
+        stop(
+            "Missing components in dat: ",
+            paste(missing_elements, collapse = ", ")
+        )
+    }
+
+    logical_arguments <- list(
+        make_dge = make_dge,
+        drop_levels = drop_levels,
+        verbose = verbose
+    )
+    invalid_logical <- vapply(
+        logical_arguments,
+        function(x) length(x) != 1L || is.na(x) || !is.logical(x),
+        logical(1)
+    )
+    if (any(invalid_logical)) {
+        stop(
+            "The following arguments must be non-missing logical scalars: ",
+            paste(names(logical_arguments)[invalid_logical], collapse = ", ")
+        )
+    }
+
+    if (!is.matrix(dat$counts) || !is.numeric(dat$counts) ||
+        is.null(colnames(dat$counts)) ||
+        is.null(rownames(dat$counts))) {
+        stop("dat$counts must be a numeric matrix with sample and gene names.")
+    }
+    if (!is.data.frame(dat$metadata) || is.null(rownames(dat$metadata))) {
+        stop("dat$metadata must be a data frame with sample row names.")
+    }
+    if (!is.data.frame(dat$genes) || is.null(rownames(dat$genes))) {
+        stop("dat$genes must be a data frame with gene row names.")
+    }
+    if (!identical(colnames(dat$counts), rownames(dat$metadata))) {
+        stop("Input counts and metadata are not in the same sample order.")
+    }
+    if (!identical(rownames(dat$counts), rownames(dat$genes))) {
+        stop("Input counts and gene annotation are not in the same gene order.")
+    }
+    if (anyDuplicated(colnames(dat$counts))) {
+        stop("Input count matrix contains duplicated sample names.")
+    }
+    if (anyDuplicated(rownames(dat$counts))) {
+        stop("Input count matrix contains duplicated gene IDs.")
+    }
+    if (!is.null(dat$qc)) {
+        if (!is.data.frame(dat$qc) || is.null(rownames(dat$qc))) {
+            stop("dat$qc must be NULL or a data frame with sample row names.")
+        }
+        if (!identical(colnames(dat$counts), rownames(dat$qc))) {
+            stop("Input counts and QC are not in the same sample order.")
+        }
+    }
+    if (!is.null(dat$sample_names) &&
+        !identical(colnames(dat$counts), as.character(dat$sample_names))) {
+        stop("dat$sample_names is not aligned with the count matrix.")
+    }
+    if (!is.null(dat$original_sample_names) &&
+        length(dat$original_sample_names) != ncol(dat$counts)) {
+        stop(
+            "dat$original_sample_names must contain one value per count-matrix ",
+            "column. Re-import legacy objects before subsetting."
+        )
+    }
+
+    metadata <- dat$metadata
+
+    # -------------------------------------------------------------------------
+    # Evaluate the caller's expression against sample metadata
+    # -------------------------------------------------------------------------
+    if (missing(subset)) {
+        stop("subset must be supplied as a metadata expression.")
+    }
+    subset_expression <- substitute(subset)
+    keep <- eval(
+        subset_expression,
+        envir = metadata,
+        enclos = parent.frame()
+    )
+    if (!is.logical(keep)) {
+        stop("subset must return a logical vector.")
+    }
+    if (length(keep) != nrow(metadata)) {
+        stop(
+            "subset returned ",
+            length(keep),
+            " values but metadata contains ",
+            nrow(metadata),
+            " samples."
+        )
+    }
+
+    keep[is.na(keep)] <- FALSE
+    if (!any(keep)) {
+        stop("No samples remain after subsetting.")
+    }
+    selected_samples <- rownames(metadata)[keep]
+
+    # -------------------------------------------------------------------------
+    # Subset metadata, counts, genes, and optional QC in a shared order
+    # -------------------------------------------------------------------------
+    metadata_subset <- metadata[selected_samples, , drop = FALSE]
+    if (drop_levels) {
+        metadata_subset[] <- lapply(metadata_subset, function(column) {
+            if (is.factor(column)) {
+                droplevels(column)
+            } else {
+                column
+            }
+        })
+    }
+
+    counts_subset <- dat$counts[, selected_samples, drop = FALSE]
+
+    # Keep every gene until a design-aware filter is applied downstream.
+    genes_subset <- dat$genes[rownames(counts_subset), , drop = FALSE]
+
+    qc_subset <- NULL
+    if (!is.null(dat$qc)) {
+        qc_subset <- dat$qc[selected_samples, , drop = FALSE]
+    }
+
+    featurecounts_summary_subset <- NULL
+    if (!is.null(dat$featurecounts_summary)) {
+        featurecounts_summary <- dat$featurecounts_summary
+        if (!is.data.frame(featurecounts_summary) ||
+            !"Status" %in% colnames(featurecounts_summary)) {
+            stop(
+                "dat$featurecounts_summary must be NULL or a data frame ",
+                "containing a Status column."
+            )
+        }
+        if (anyDuplicated(colnames(featurecounts_summary))) {
+            stop("dat$featurecounts_summary contains duplicated column names.")
+        }
+        missing_summary_samples <- setdiff(
+            selected_samples,
+            colnames(featurecounts_summary)
+        )
+        if (length(missing_summary_samples) > 0L) {
+            stop(
+                "Selected samples missing from featureCounts summary: ",
+                paste(missing_summary_samples, collapse = ", ")
+            )
+        }
+        featurecounts_summary_subset <- featurecounts_summary[
+            ,
+            c("Status", selected_samples),
+            drop = FALSE
+        ]
+    }
+
+    # -------------------------------------------------------------------------
+    # Validate the subset before constructing downstream objects
+    # -------------------------------------------------------------------------
+    if (!identical(colnames(counts_subset), rownames(metadata_subset))) {
+        stop("Internal error: subset counts and metadata order do not match.")
+    }
+    if (!is.null(qc_subset) &&
+        !identical(colnames(counts_subset), rownames(qc_subset))) {
+        stop("Internal error: subset counts and QC order do not match.")
+    }
+    if (!identical(rownames(counts_subset), rownames(genes_subset))) {
+        stop("Internal error: subset counts and gene annotation order do not match.")
+    }
+
+    # -------------------------------------------------------------------------
+    # Build a fresh DGEList so library information reflects selected samples
+    # -------------------------------------------------------------------------
+    dge_subset <- NULL
+    if (make_dge) {
+        if (!requireNamespace("edgeR", quietly = TRUE)) {
+            warning("edgeR is not installed; DGEList was not generated.")
+        } else {
+            # Do not let library fields from a previous edgeR object override
+            # values that must be recalculated from this subset's counts.
+            dge_samples <- metadata_subset[
+                ,
+                setdiff(
+                    colnames(metadata_subset),
+                    c("lib.size", "norm.factors")
+                ),
+                drop = FALSE
+            ]
+            dge_subset <- edgeR::DGEList(
+                counts = counts_subset,
+                samples = dge_samples,
+                genes = genes_subset
+            )
+        }
+    }
+
+    original_sample_names_subset <- NULL
+    if (!is.null(dat$original_sample_names)) {
+        selected_positions <- match(selected_samples, colnames(dat$counts))
+        original_sample_names_subset <- as.character(
+            dat$original_sample_names[selected_positions]
+        )
+    }
+
+    result <- list(
+        counts = counts_subset,
+        metadata = metadata_subset,
+        genes = genes_subset,
+        qc = qc_subset,
+        featurecounts_summary = featurecounts_summary_subset,
+        dge = dge_subset,
+        original_sample_names = original_sample_names_subset,
+        sample_names = selected_samples
+    )
+    class(result) <- c("featurecounts_project", "list")
+
+    if (verbose) {
+        message("")
+        message("==========================================")
+        message(" featureCounts project subset")
+        message("==========================================")
+        message(
+            "Samples retained: ",
+            ncol(counts_subset),
+            " / ",
+            ncol(dat$counts)
+        )
+        message("Genes retained:   ", nrow(counts_subset))
+        message("")
+        message("Samples:")
+        message(paste(selected_samples, collapse = "\n"))
+        message("==========================================")
+        message("")
+    }
+
+    result
 }
 
 
