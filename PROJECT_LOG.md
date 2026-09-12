@@ -8,6 +8,14 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `plot_gene_set_heatmap()` to the R bulk/pseudobulk visualization
+  section for ordered gene-program heatmaps from raw project counts, with TMM
+  log2-CPM normalization, optional aggregation, annotations, and clustering.
+- Added `GENE_SET_HEATMAP_COLORS` as the reusable five-colour purple palette
+  supplied with the gene-set heatmap.
+- Documented every gene-set heatmap input and returned object, gene resolution,
+  normalization, aggregation, metadata ordering, row scaling, annotation,
+  clustering, export, dependencies, and scientific scope.
 - Added `plot_de_heatmap()` to the R differential-expression visualization
   section for direction-balanced gene selection and normalized sample-level
   ComplexHeatmap output.
@@ -60,6 +68,13 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Reworked the supplied gene-set heatmap into the namespace-safe R pipeline
+  style, removing its attached-pipe dependency and adding project, gene-set,
+  count, metadata, aggregation, ordering, scaling, palette, clustering, and
+  graphics-device safeguards.
+- Required aggregated annotation and ordering fields to be constant within
+  their groups and aligned the default purple colour breaks to the requested
+  z-score cap or observed expression range.
 - Reworked the supplied heatmap function into the namespace-safe R pipeline
   style, removing its attached-pipe dependency and adding identifier,
   statistic, metadata, cutoff, correction, ordering, annotation, palette,
@@ -112,6 +127,10 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the gene-set heatmap project alignment, normalization, gene mapping,
+  duplicate-set handling, sample aggregation, metadata constancy, ordering,
+  row scaling, colour breaks, annotations, clustering, export, return interface,
+  reusable palette, Roxygen comments, README, and Git diff before committing.
 - Reviewed the DE heatmap input alignment, directional selection, forced-gene
   reservation, visualization-only correction, row scaling and capping, column
   ordering, annotations, clustering, label placement, export, returned data,
@@ -137,6 +156,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: add gene-set expression heatmap` — Added the documented gene-program
+  ComplexHeatmap utility, reusable purple palette, safeguards, and README
+  guidance.
 - `feat: add differential-expression heatmap` — Added the documented DE-selected
   ComplexHeatmap utility, reusable diverging palette, safeguards, and README
   guidance.

@@ -295,6 +295,7 @@ functions supplied in R.
 | Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
 | Bulk/pseudobulk quality-control visualization | `plot_bulk_qc()` | Calculates count-matrix library sizes and plots selected sample-level read, assignment, and library metrics in faceted panels. | Combined patchwork figure, individual metric plots, plotting metadata, and colour mapping. |
 | Bulk/pseudobulk expression visualization | `plot_bulk_violin()` | Calculates TMM-normalized log2 CPM and plots selected gene distributions with optional boxplots, sample points, and split facets. | Plot, long-format expression data, per-panel summaries, gene mapping, log2 CPM, DGEList, and colours. |
+| Gene-program expression heatmap | `plot_gene_set_heatmap()` | Resolves named gene sets, calculates TMM log2 CPM, optionally aggregates samples, and displays genes in ordered program slices. | ComplexHeatmap object, displayed and pre-scaled matrices, log2 CPM, gene mapping, missing genes, aligned metadata, row split, colour function, and DGEList. |
 | Differential-expression heatmap | `plot_de_heatmap()` | Selects directional DE genes and displays normalized sample-level expression with optional visualization-only batch correction and marked-gene labels. | ComplexHeatmap object, displayed matrix, corrected expression, selected DE rows, ordered metadata, row split, labels, and colour function. |
 | Differential-expression visualization | `plot_signed_manhattan()` | Displays signed adjusted-p-value significance for every tested gene across comparisons and sorting groups. | Plot, complete plotting data, selected labels, per-panel summary, colours, and cutoff metadata. |
 
@@ -609,6 +610,57 @@ This is a descriptive replicate-level view for raw bulk or replicate-aware
 pseudobulk counts. It does not replace study-design-aware differential
 expression, effect-size estimation, or biological replication checks.
 
+### `plot_gene_set_heatmap(...)`
+
+Creates a program-oriented expression heatmap directly from a featureCounts
+project and a named list of gene symbols or stable IDs. Gene-set list order and
+gene order are retained by default, and the first gene-set assignment wins when
+multiple sets resolve to the same count-matrix row.
+
+```r
+programs <- list(
+  Stemness = c("GATA2", "KIT", "PROM1"),
+  Myeloid = c("SPI1", "CEBPA", "MPO")
+)
+
+program_heatmap <- plot_gene_set_heatmap(
+  project,
+  gene_sets = programs,
+  subset = Condition != "Excluded",
+  aggregate_by = c("Condition", "Sorting"),
+  factor_orders = list(
+    Condition = c("Control", "Treated")
+  ),
+  annotation_cols = c("Condition", "Sorting"),
+  save = "outputs/gene_set_heatmap.pdf"
+)
+
+program_heatmap$gene_mapping
+program_heatmap$missing_genes
+program_heatmap$matrix
+```
+
+The function recalculates TMM normalization after optional sample subsetting.
+It can show individual samples or aggregate columns using a scalar summary
+function such as `mean`. Factor levels control reproducible group order, and
+`order_by` can apply a final metadata-based column order. For aggregated
+columns, every metadata field used for annotation or ordering must be constant
+within its aggregate group; ambiguous annotations stop with an explanatory
+error.
+
+Rows can be standardized and capped before plotting. The default five-colour
+purple mapping follows the actual z-score cap rather than assuming a fixed
+range. `preserve_gene_order = TRUE` disables row clustering; set it to `FALSE`
+when row clustering is desired. Column clustering can override the visible
+metadata order.
+
+The returned list retains both displayed and pre-scaled expression matrices,
+the full normalized log2-CPM matrix, resolved and missing genes, aligned column
+metadata, row-slice assignments, colour function, and normalized edgeR object.
+The heatmap is descriptive and does not replace design-aware differential
+expression or biological replication checks. Required packages are edgeR,
+ComplexHeatmap, and circlize.
+
 ### `plot_de_heatmap(...)`
 
 Builds a direction-split ComplexHeatmap from an existing normalized,
@@ -723,6 +775,7 @@ required for interpretation.
 | `BULK_QC_MACARON_COLORS` | 12 muted colours beginning with neutral grey | Default ordered groups in `plot_bulk_qc()`, especially when the first group is a reference or control. |
 | `BULK_VIOLIN_MACARON_COLORS` | 12 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_violin()`. |
 | `DE_HEATMAP_COLORS` | Blue, white, and muted red | Default symmetric low-midpoint-high scale in `plot_de_heatmap()`. |
+| `GENE_SET_HEATMAP_COLORS` | Five light-to-dark purple colours | Default expression scale in `plot_gene_set_heatmap()`. |
 | `SIGNED_MANHATTAN_MACARON_COLORS` | 12 muted comparison colours | Default comparison labels in `plot_signed_manhattan()`. |
 
 The palette is stored as an unnamed character vector so a plotting function
