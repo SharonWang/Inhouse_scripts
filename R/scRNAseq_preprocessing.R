@@ -102,6 +102,23 @@ BULK_VIOLIN_MACARON_COLORS <- c(
 )
 
 
+#' Diverging palette for differential-expression heatmaps
+#'
+#' A reusable blue-white-red palette supplied with [plot_de_heatmap()]. The
+#' low, midpoint, and high colours are intentionally unnamed because they map
+#' directly to the symmetric heatmap scale.
+#'
+#' @return A character vector containing three hexadecimal colour values.
+#'
+#' @examples
+#' DE_HEATMAP_COLORS
+DE_HEATMAP_COLORS <- c(
+    "#5B78A5", # lower expression
+    "#FFFFFF", # midpoint
+    "#C76B6B"  # higher expression
+)
+
+
 #' Macaron comparison palette for signed Manhattan plots
 #'
 #' A reusable vector of 12 muted colours supplied with
@@ -4136,6 +4153,913 @@ plot_bulk_violin <- function(
         dge = dge,
         colors = colors
     )
+}
+
+
+#' Plot a differential-expression-selected expression heatmap
+#'
+#' Select the strongest negatively and positively changing genes from a
+#' differential-expression table, optionally force specified genes into the
+#' selection, and display their normalized sample-level expression in a
+#' direction-split ComplexHeatmap. Optional batch correction affects the
+#' visualization matrix only and never changes the supplied DE statistics.
+#'
+#' @param expr Numeric gene-by-sample matrix of normalized, preferably
+#'   log-transformed expression values. Row names must match `gene_key_col` in
+#'   `de`, and column names must match metadata sample identifiers. Do not pass
+#'   raw counts directly.
+#' @param meta Data frame containing one row per sample and the grouping,
+#'   ordering, annotation, batch, covariate, and preservation fields requested
+#'   below.
+#' @param de Data frame containing one row per tested gene and at least the
+#'   columns named by `gene_key_col`, `logfc_col`, and `padj_col`.
+#' @param gene_key_col Character scalar naming the stable gene key in `de` that
+#'   matches `rownames(expr)`.
+#' @param gene_label_col `NULL` or a character scalar naming the preferred
+#'   display-label column in `de`. Missing or blank labels fall back to the
+#'   stable gene key.
+#' @param logfc_col Character scalar naming the numeric log2-fold-change column.
+#'   Positive values are assigned the positive side label and negative values
+#'   the negative side label.
+#' @param padj_col Character scalar naming the numeric adjusted-p-value column.
+#'   Values must be finite and between zero and one.
+#' @param sample_id_col `NULL` or a character scalar naming sample identifiers
+#'   in `meta`. Metadata row names are used when this is `NULL`.
+#' @param group_col Character scalar naming the biological group column in
+#'   `meta`.
+#' @param group_order `NULL` or a unique character vector defining biological
+#'   group order. Observed groups omitted from the vector are appended in
+#'   first-seen order; unobserved supplied values are dropped.
+#' @param side_labels Named character vector containing unique `negative` and
+#'   `positive` labels for the two directional row slices.
+#' @param fdr_cutoff Numeric scalar in `(0, 1]` defining adjusted-p-value
+#'   significance for automatic gene selection.
+#' @param logfc_cutoff Non-negative numeric scalar defining the minimum absolute
+#'   log2 fold change for automatic gene selection.
+#' @param max_genes_per_side Non-negative integer giving the target maximum
+#'   number of selected genes in each direction. Forced genes reserve slots but
+#'   can exceed this maximum when more are requested.
+#' @param force_genes `NULL` or a character vector of gene keys or display
+#'   labels to include when present and directionally non-zero, regardless of
+#'   the DE cutoffs.
+#' @param rank_by Character scalar. `"padj"` ranks by adjusted p-value then
+#'   absolute effect; `"abs_logFC"` reverses those priorities.
+#' @param batch_col,batch2_col `NULL` or character scalars naming categorical
+#'   nuisance variables removed from the visualization matrix with
+#'   [limma::removeBatchEffect()].
+#' @param covariate_cols `NULL` or a character vector naming numeric nuisance
+#'   covariates removed from the visualization matrix.
+#' @param preserve_cols `NULL` or a character vector naming biological effects
+#'   represented in the design supplied to [limma::removeBatchEffect()]. These
+#'   variables are preserved during visualization-only correction.
+#' @param row_zscore Logical scalar. Whether to standardize each selected gene
+#'   across samples. Zero-variance genes are removed before scaling.
+#' @param z_cap `NULL` or a positive numeric scalar used to symmetrically cap
+#'   displayed matrix values after optional row standardization.
+#' @param order_by `NULL` or a character vector naming metadata columns used to
+#'   order heatmap columns. The default uses `group_col`.
+#' @param annotation_cols `NULL` or a character vector naming metadata columns
+#'   shown above the heatmap. The default uses `group_col`.
+#' @param annotation_colors `NULL` or a named list of annotation colour maps
+#'   passed to [ComplexHeatmap::HeatmapAnnotation()].
+#' @param show_annotation_name Logical scalar. Whether top-annotation names are
+#'   displayed.
+#' @param label_genes `NULL` or a character vector of selected gene keys or
+#'   display labels to mark beside the heatmap.
+#' @param label_top_per_side Non-negative integer giving the maximum number of
+#'   automatically marked genes in each direction.
+#' @param label_force_genes Logical scalar. Whether successfully selected forced
+#'   genes are marked automatically.
+#' @param label_side One of `"left"` or `"right"`, controlling the side used by
+#'   the marked-gene row annotation.
+#' @param label_fontsize Positive numeric scalar controlling marked-gene text.
+#' @param label_italic Logical scalar. Whether marked-gene labels use italic
+#'   text.
+#' @param label_link_width_mm,label_padding_mm Non-negative numeric scalars
+#'   controlling marked-gene connector width and label padding in millimetres.
+#' @param cluster_rows Logical scalar. Whether rows are clustered within the
+#'   heatmap.
+#' @param cluster_row_slices Logical scalar. Whether the negative and positive
+#'   directional slices are clustered relative to each other.
+#' @param show_row_dend Logical scalar. Whether to display the row dendrogram.
+#' @param cluster_columns Logical scalar. Whether sample columns are clustered.
+#'   Enabling this can override the visible `order_by` arrangement.
+#' @param show_column_dend Logical scalar. Whether to display the column
+#'   dendrogram.
+#' @param clustering_distance_rows Character scalar or distance function passed
+#'   to [ComplexHeatmap::Heatmap()] for row clustering.
+#' @param clustering_method_rows Character scalar naming the row-clustering
+#'   linkage method passed to [ComplexHeatmap::Heatmap()].
+#' @param heatmap_colors Character vector of exactly three valid colours for
+#'   low, midpoint, and high values. The default is `DE_HEATMAP_COLORS`.
+#' @param heatmap_name Non-empty character scalar used as the heatmap name.
+#' @param show_column_names,show_row_names Logical scalars controlling sample
+#'   and gene names drawn by the main heatmap body.
+#' @param border Logical scalar. Whether to draw a heatmap border.
+#' @param cell_border Character scalar specifying cell-border colour.
+#' @param cell_border_lwd Non-negative numeric scalar controlling cell-border
+#'   line width.
+#' @param row_gap_mm Non-negative numeric scalar controlling directional-slice
+#'   spacing in millimetres.
+#' @param use_raster Logical scalar passed to [ComplexHeatmap::Heatmap()].
+#' @param heatmap_legend_title Character scalar used as the heatmap legend title.
+#' @param width,height Positive numeric scalars giving saved figure dimensions
+#'   in inches.
+#' @param save `NULL` or a character scalar giving an output path. PDF files use
+#'   `grDevices::cairo_pdf`; other paths are written as 300-dpi PNG files.
+#' @param draw_plot Logical scalar. Whether to draw the heatmap on the current
+#'   graphics device in addition to any saved output.
+#' @param verbose Logical scalar. Whether to report directional gene counts and
+#'   visualization-correction details.
+#'
+#' @return Invisibly returns a named list containing:
+#'   \describe{
+#'     \item{heatmap}{The assembled `Heatmap` or `HeatmapList` object.}
+#'     \item{matrix}{The selected, optionally corrected, row-standardized, and
+#'       capped matrix displayed by the heatmap.}
+#'     \item{expression_corrected}{The complete normalized input matrix after
+#'       optional visualization-only batch correction and before selection or
+#'       row standardization.}
+#'     \item{selected_de}{The resolved DE rows used in the heatmap, including
+#'       internal gene keys, labels, effects, adjusted p-values, directions,
+#'       and unique display labels.}
+#'     \item{metadata}{Expression-aligned metadata in displayed column order.}
+#'     \item{row_split}{Directional factor aligned to heatmap rows.}
+#'     \item{labels}{Display labels marked by `anno_mark`, or `character(0)`.}
+#'     \item{col_fun}{The colour-mapping function used by the heatmap.}
+#'   }
+#'
+#' @details
+#' DE-based gene selection is a visualization choice and must not be reused as
+#' an independent statistical test. Batch correction is applied only to the
+#' expression matrix displayed here; the original DE table remains unchanged.
+#' Required packages are `ComplexHeatmap` and `circlize`; `limma` is additionally
+#' required when any visualization-correction variable is supplied.
+#'
+#' @examples
+#' \dontrun{
+#' heatmap_result <- plot_de_heatmap(
+#'     expr = voom_result$voom$E,
+#'     meta = project$metadata,
+#'     de = voom_result$results,
+#'     gene_key_col = "gene_id",
+#'     gene_label_col = "gene_name",
+#'     group_col = "Condition",
+#'     group_order = c("Control", "Treated"),
+#'     annotation_cols = c("Condition", "Batch"),
+#'     max_genes_per_side = 25,
+#'     draw_plot = TRUE,
+#'     save = "outputs/de_heatmap.pdf"
+#' )
+#' heatmap_result$selected_de
+#' heatmap_result$matrix
+#' }
+#'
+#' @export
+plot_de_heatmap <- function(
+    expr,
+    meta,
+    de,
+    gene_key_col = "gene",
+    gene_label_col = NULL,
+    logfc_col = "logFC",
+    padj_col = "adj.P.Val",
+    sample_id_col = NULL,
+    group_col,
+    group_order = NULL,
+    side_labels = c(negative = "Lower", positive = "Higher"),
+    fdr_cutoff = 0.05,
+    logfc_cutoff = 0,
+    max_genes_per_side = 25,
+    force_genes = NULL,
+    rank_by = c("padj", "abs_logFC"),
+    batch_col = NULL,
+    batch2_col = NULL,
+    covariate_cols = NULL,
+    preserve_cols = NULL,
+    row_zscore = TRUE,
+    z_cap = 2.5,
+    order_by = NULL,
+    annotation_cols = NULL,
+    annotation_colors = NULL,
+    show_annotation_name = FALSE,
+    label_genes = NULL,
+    label_top_per_side = 0,
+    label_force_genes = TRUE,
+    label_side = c("left", "right"),
+    label_fontsize = 9,
+    label_italic = TRUE,
+    label_link_width_mm = 4,
+    label_padding_mm = 1,
+    cluster_rows = TRUE,
+    cluster_row_slices = FALSE,
+    show_row_dend = FALSE,
+    cluster_columns = FALSE,
+    show_column_dend = FALSE,
+    clustering_distance_rows = "euclidean",
+    clustering_method_rows = "ward.D2",
+    heatmap_colors = DE_HEATMAP_COLORS,
+    heatmap_name = "Row z-score",
+    show_column_names = FALSE,
+    show_row_names = FALSE,
+    border = TRUE,
+    cell_border = "white",
+    cell_border_lwd = 0.4,
+    row_gap_mm = 1.5,
+    use_raster = FALSE,
+    heatmap_legend_title = "Expression\nrow z-score",
+    width = 7,
+    height = 8,
+    save = NULL,
+    draw_plot = TRUE,
+    verbose = TRUE
+) {
+    required_packages <- c("ComplexHeatmap", "circlize")
+    missing_packages <- required_packages[!vapply(
+        required_packages,
+        requireNamespace,
+        logical(1),
+        quietly = TRUE
+    )]
+    if (length(missing_packages) > 0L) {
+        stop(
+            "Please install required package(s): ",
+            paste(missing_packages, collapse = ", "), call. = FALSE
+        )
+    }
+    correction_requested <- !is.null(batch_col) || !is.null(batch2_col) ||
+        !is.null(covariate_cols)
+    if (correction_requested && !requireNamespace("limma", quietly = TRUE)) {
+        stop("Package 'limma' is required for removeBatchEffect().",
+             call. = FALSE)
+    }
+
+    rank_by <- match.arg(rank_by)
+    label_side <- match.arg(label_side)
+    scalar_text <- function(x) {
+        is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+    }
+    column_arguments <- list(
+        gene_key_col = gene_key_col,
+        logfc_col = logfc_col,
+        padj_col = padj_col,
+        group_col = group_col
+    )
+    invalid_columns <- names(column_arguments)[!vapply(
+        column_arguments, scalar_text, logical(1)
+    )]
+    if (length(invalid_columns) > 0L ||
+        (!is.null(gene_label_col) && !scalar_text(gene_label_col)) ||
+        (!is.null(sample_id_col) && !scalar_text(sample_id_col)) ||
+        (!is.null(batch_col) && !scalar_text(batch_col)) ||
+        (!is.null(batch2_col) && !scalar_text(batch2_col))) {
+        stop("Column-name arguments must be NULL or non-empty strings as allowed.",
+             call. = FALSE)
+    }
+    if (!is.null(preserve_cols) && !correction_requested) {
+        stop(
+            "`preserve_cols` is only used when a batch or covariate correction ",
+            "is requested.", call. = FALSE
+        )
+    }
+    if (!(scalar_text(clustering_distance_rows) ||
+        is.function(clustering_distance_rows)) ||
+        !scalar_text(clustering_method_rows)) {
+        stop("Row clustering distance and method arguments are invalid.",
+             call. = FALSE)
+    }
+
+    logical_arguments <- list(
+        row_zscore = row_zscore,
+        show_annotation_name = show_annotation_name,
+        label_force_genes = label_force_genes,
+        label_italic = label_italic,
+        cluster_rows = cluster_rows,
+        cluster_row_slices = cluster_row_slices,
+        show_row_dend = show_row_dend,
+        cluster_columns = cluster_columns,
+        show_column_dend = show_column_dend,
+        show_column_names = show_column_names,
+        show_row_names = show_row_names,
+        border = border,
+        use_raster = use_raster,
+        draw_plot = draw_plot,
+        verbose = verbose
+    )
+    invalid_logical <- names(logical_arguments)[!vapply(
+        logical_arguments,
+        function(x) is.logical(x) && length(x) == 1L && !is.na(x),
+        logical(1)
+    )]
+    if (length(invalid_logical) > 0L) {
+        stop(
+            "These arguments must be single TRUE/FALSE values: ",
+            paste(invalid_logical, collapse = ", "), call. = FALSE
+        )
+    }
+
+    numeric_arguments <- list(
+        fdr_cutoff = fdr_cutoff,
+        logfc_cutoff = logfc_cutoff,
+        label_fontsize = label_fontsize,
+        label_link_width_mm = label_link_width_mm,
+        label_padding_mm = label_padding_mm,
+        cell_border_lwd = cell_border_lwd,
+        row_gap_mm = row_gap_mm,
+        width = width,
+        height = height
+    )
+    invalid_numeric <- names(numeric_arguments)[!vapply(
+        numeric_arguments,
+        function(x) is.numeric(x) && length(x) == 1L &&
+            !is.na(x) && is.finite(x),
+        logical(1)
+    )]
+    if (length(invalid_numeric) > 0L) {
+        stop(
+            "These arguments must be finite numeric scalars: ",
+            paste(invalid_numeric, collapse = ", "), call. = FALSE
+        )
+    }
+    if (fdr_cutoff <= 0 || fdr_cutoff > 1 || logfc_cutoff < 0 ||
+        label_fontsize <= 0 || label_link_width_mm < 0 ||
+        label_padding_mm < 0 || cell_border_lwd < 0 || row_gap_mm < 0 ||
+        width <= 0 || height <= 0) {
+        stop("Cutoffs and display dimensions are outside their allowed ranges.",
+             call. = FALSE)
+    }
+    integer_arguments <- list(
+        max_genes_per_side = max_genes_per_side,
+        label_top_per_side = label_top_per_side
+    )
+    invalid_integer <- names(integer_arguments)[!vapply(
+        integer_arguments,
+        function(x) is.numeric(x) && length(x) == 1L && !is.na(x) &&
+            is.finite(x) && x >= 0 && x == as.integer(x),
+        logical(1)
+    )]
+    if (length(invalid_integer) > 0L) {
+        stop(
+            "These arguments must be non-negative integers: ",
+            paste(invalid_integer, collapse = ", "), call. = FALSE
+        )
+    }
+    if (!is.null(z_cap) && (!is.numeric(z_cap) || length(z_cap) != 1L ||
+        is.na(z_cap) || !is.finite(z_cap) || z_cap <= 0)) {
+        stop("`z_cap` must be NULL or a positive numeric scalar.", call. = FALSE)
+    }
+    if (!is.character(heatmap_colors) || length(heatmap_colors) != 3L ||
+        anyNA(heatmap_colors) || any(!nzchar(heatmap_colors))) {
+        stop("`heatmap_colors` must contain exactly three colour strings.",
+             call. = FALSE)
+    }
+    if (!scalar_text(heatmap_name) || !scalar_text(heatmap_legend_title) ||
+        !scalar_text(cell_border) ||
+        (!is.null(save) && !scalar_text(save))) {
+        stop("Heatmap text and output-path arguments must be non-empty strings.",
+             call. = FALSE)
+    }
+
+    expr <- as.matrix(expr)
+    meta <- as.data.frame(meta)
+    de_original <- as.data.frame(de)
+    if (!is.numeric(expr) || nrow(expr) == 0L || ncol(expr) == 0L) {
+        stop("`expr` must be a non-empty numeric gene-by-sample matrix.",
+             call. = FALSE)
+    }
+    if (is.null(rownames(expr)) || is.null(colnames(expr)) ||
+        anyNA(rownames(expr)) || anyNA(colnames(expr)) ||
+        any(!nzchar(rownames(expr))) || any(!nzchar(colnames(expr)))) {
+        stop("`expr` requires non-empty gene row names and sample column names.",
+             call. = FALSE)
+    }
+    if (anyDuplicated(rownames(expr)) || anyDuplicated(colnames(expr))) {
+        stop("Expression gene and sample identifiers must be unique.",
+             call. = FALSE)
+    }
+    if (anyNA(expr) || any(!is.finite(expr))) {
+        stop("`expr` must contain only finite, non-missing values.",
+             call. = FALSE)
+    }
+    if (row_zscore && ncol(expr) < 2L) {
+        stop("At least two expression samples are required for row z-scores.",
+             call. = FALSE)
+    }
+
+    required_de_columns <- c(gene_key_col, logfc_col, padj_col)
+    missing_de_columns <- setdiff(required_de_columns, colnames(de_original))
+    if (length(missing_de_columns) > 0L) {
+        stop(
+            "DE table is missing: ",
+            paste(missing_de_columns, collapse = ", "), call. = FALSE
+        )
+    }
+    if (!group_col %in% colnames(meta)) {
+        stop("`group_col = \"", group_col, "\"` was not found in metadata.",
+             call. = FALSE)
+    }
+
+    if (is.null(sample_id_col)) {
+        if (is.null(rownames(meta))) {
+            stop("Metadata needs row names or `sample_id_col`.", call. = FALSE)
+        }
+        meta$.SampleID <- rownames(meta)
+    } else {
+        if (!sample_id_col %in% colnames(meta)) {
+            stop("sample_id_col '", sample_id_col, "' not found in metadata.",
+                 call. = FALSE)
+        }
+        meta$.SampleID <- as.character(meta[[sample_id_col]])
+    }
+    if (anyNA(meta$.SampleID) || any(!nzchar(meta$.SampleID)) ||
+        anyDuplicated(meta$.SampleID)) {
+        stop("Metadata sample IDs must be unique, non-empty, and non-missing.",
+             call. = FALSE)
+    }
+    missing_meta_samples <- setdiff(colnames(expr), meta$.SampleID)
+    if (length(missing_meta_samples) > 0L) {
+        stop(
+            "Some expression samples are absent from metadata: ",
+            paste(head(missing_meta_samples, 10L), collapse = ", "),
+            call. = FALSE
+        )
+    }
+    meta <- meta[match(colnames(expr), meta$.SampleID), , drop = FALSE]
+    rownames(meta) <- meta$.SampleID
+
+    observed_groups <- as.character(meta[[group_col]])
+    if (anyNA(observed_groups) || any(!nzchar(observed_groups))) {
+        stop("The selected group column contains missing or empty values.",
+             call. = FALSE)
+    }
+    observed_groups <- unique(observed_groups)
+    if (is.null(group_order)) {
+        group_order <- observed_groups
+    } else {
+        if (!is.character(group_order) || anyNA(group_order) ||
+            any(!nzchar(group_order)) || anyDuplicated(group_order)) {
+            stop("`group_order` must contain unique non-empty strings.",
+                 call. = FALSE)
+        }
+        group_order <- c(group_order, setdiff(observed_groups, group_order))
+        group_order <- group_order[group_order %in% observed_groups]
+    }
+    meta[[group_col]] <- factor(
+        as.character(meta[[group_col]]), levels = group_order
+    )
+
+    if (!is.character(side_labels) ||
+        !all(c("negative", "positive") %in% names(side_labels))) {
+        stop("`side_labels` must contain names 'negative' and 'positive'.",
+             call. = FALSE)
+    }
+    negative_label <- unname(side_labels[["negative"]])
+    positive_label <- unname(side_labels[["positive"]])
+    if (!scalar_text(negative_label) || !scalar_text(positive_label) ||
+        identical(negative_label, positive_label)) {
+        stop("Negative and positive side labels must be distinct strings.",
+             call. = FALSE)
+    }
+
+    de_data <- de_original
+    de_data$.GeneKey <- as.character(de_data[[gene_key_col]])
+    de_data$.GeneLabel <- if (!is.null(gene_label_col) &&
+        gene_label_col %in% colnames(de_data)) {
+        as.character(de_data[[gene_label_col]])
+    } else {
+        de_data$.GeneKey
+    }
+    bad_labels <- is.na(de_data$.GeneLabel) | !nzchar(de_data$.GeneLabel)
+    de_data$.GeneLabel[bad_labels] <- de_data$.GeneKey[bad_labels]
+    de_data$.logFC <- suppressWarnings(as.numeric(de_data[[logfc_col]]))
+    de_data$.padj <- suppressWarnings(as.numeric(de_data[[padj_col]]))
+    usable <- !is.na(de_data$.GeneKey) & nzchar(de_data$.GeneKey) &
+        is.finite(de_data$.logFC) & is.finite(de_data$.padj) &
+        de_data$.padj >= 0 & de_data$.padj <= 1
+    if (verbose && any(!usable)) {
+        message(sum(!usable), " unusable DE rows were ignored.")
+    }
+    de_data <- de_data[usable, , drop = FALSE]
+    if (nrow(de_data) == 0L) {
+        stop("No usable rows remain in the DE table.", call. = FALSE)
+    }
+    de_order <- order(de_data$.padj, -abs(de_data$.logFC))
+    de_data <- de_data[de_order, , drop = FALSE]
+    de_data <- de_data[!duplicated(de_data$.GeneKey), , drop = FALSE]
+
+    available <- de_data$.GeneKey %in% rownames(expr)
+    if (verbose && any(!available)) {
+        message(sum(!available), " DE genes were not present in expr and were ignored.")
+    }
+    de_data <- de_data[available, , drop = FALSE]
+    if (nrow(de_data) == 0L) {
+        stop("No DE genes were present in the expression matrix.", call. = FALSE)
+    }
+    de_data$.Direction <- NA_character_
+    de_data$.Direction[de_data$.logFC < 0] <- negative_label
+    de_data$.Direction[de_data$.logFC > 0] <- positive_label
+
+    rank_de <- function(data) {
+        if (nrow(data) == 0L) {
+            return(data)
+        }
+        row_order <- if (rank_by == "padj") {
+            order(data$.padj, -abs(data$.logFC))
+        } else {
+            order(-abs(data$.logFC), data$.padj)
+        }
+        data[row_order, , drop = FALSE]
+    }
+    bind_unique <- function(...) {
+        inputs <- list(...)
+        inputs <- inputs[vapply(inputs, nrow, integer(1)) > 0L]
+        if (length(inputs) == 0L) {
+            return(de_data[FALSE, , drop = FALSE])
+        }
+        output <- do.call(rbind, inputs)
+        output[!duplicated(output$.GeneKey), , drop = FALSE]
+    }
+
+    force_genes <- if (is.null(force_genes)) character(0) else
+        unique(as.character(force_genes))
+    force_genes <- force_genes[!is.na(force_genes) & nzchar(force_genes)]
+    force_match <- de_data$.GeneKey %in% force_genes |
+        de_data$.GeneLabel %in% force_genes
+    force_info <- de_data[force_match & !is.na(de_data$.Direction), , drop = FALSE]
+    if (length(force_genes) > 0L && verbose) {
+        matched_force <- unique(c(
+            force_info$.GeneKey[force_info$.GeneKey %in% force_genes],
+            force_info$.GeneLabel[force_info$.GeneLabel %in% force_genes]
+        ))
+        missing_force <- setdiff(force_genes, matched_force)
+        if (length(missing_force) > 0L) {
+            warning(
+                "Forced genes not found or lacking a non-zero direction: ",
+                paste(missing_force, collapse = ", "), call. = FALSE
+            )
+        }
+    }
+    force_negative <- force_info[
+        force_info$.Direction == negative_label, , drop = FALSE
+    ]
+    force_positive <- force_info[
+        force_info$.Direction == positive_label, , drop = FALSE
+    ]
+
+    significant_negative <- de_data[
+        de_data$.padj < fdr_cutoff & de_data$.logFC < -logfc_cutoff &
+            !de_data$.GeneKey %in% force_info$.GeneKey,
+        , drop = FALSE
+    ]
+    significant_positive <- de_data[
+        de_data$.padj < fdr_cutoff & de_data$.logFC > logfc_cutoff &
+            !de_data$.GeneKey %in% force_info$.GeneKey,
+        , drop = FALSE
+    ]
+    significant_negative <- rank_de(significant_negative)
+    significant_positive <- rank_de(significant_positive)
+    negative_slots <- max(0L, as.integer(max_genes_per_side) -
+        nrow(force_negative))
+    positive_slots <- max(0L, as.integer(max_genes_per_side) -
+        nrow(force_positive))
+    selected_negative <- bind_unique(
+        head(significant_negative, negative_slots), force_negative
+    )
+    selected_positive <- bind_unique(
+        head(significant_positive, positive_slots), force_positive
+    )
+    selected_de <- bind_unique(selected_negative, selected_positive)
+    if (nrow(selected_de) == 0L) {
+        stop("No DE genes passed the requested thresholds.", call. = FALSE)
+    }
+
+    expr_visual <- expr
+    if (correction_requested) {
+        correction_columns <- c(batch_col, batch2_col, covariate_cols)
+        correction_columns <- correction_columns[!is.na(correction_columns)]
+        missing_correction <- setdiff(correction_columns, colnames(meta))
+        if (length(missing_correction) > 0L) {
+            stop(
+                "Missing visualization-correction columns: ",
+                paste(missing_correction, collapse = ", "), call. = FALSE
+            )
+        }
+        for (batch_name in c(batch_col, batch2_col)) {
+            if (!is.null(batch_name)) {
+                batch_values <- meta[[batch_name]]
+                if (anyNA(batch_values) || length(unique(batch_values)) < 2L) {
+                    stop("Batch columns require complete values and two levels.",
+                         call. = FALSE)
+                }
+            }
+        }
+        covariate_matrix <- NULL
+        if (!is.null(covariate_cols)) {
+            if (!is.character(covariate_cols) || anyDuplicated(covariate_cols)) {
+                stop("`covariate_cols` must contain unique column names.",
+                     call. = FALSE)
+            }
+            numeric_covariates <- vapply(
+                meta[covariate_cols], is.numeric, logical(1)
+            )
+            if (!all(numeric_covariates) ||
+                anyNA(meta[covariate_cols]) ||
+                any(!is.finite(as.matrix(meta[covariate_cols])))) {
+                stop("Visualization covariates must be complete finite numerics.",
+                     call. = FALSE)
+            }
+            covariate_matrix <- as.matrix(meta[covariate_cols])
+        }
+
+        preserve_design <- NULL
+        if (!is.null(preserve_cols)) {
+            if (!is.character(preserve_cols) || anyNA(preserve_cols) ||
+                any(!nzchar(preserve_cols)) || anyDuplicated(preserve_cols)) {
+                stop("`preserve_cols` must contain unique non-empty names.",
+                     call. = FALSE)
+            }
+            missing_preserve <- setdiff(preserve_cols, colnames(meta))
+            if (length(missing_preserve) > 0L) {
+                stop(
+                    "Missing preserve_cols: ",
+                    paste(missing_preserve, collapse = ", "), call. = FALSE
+                )
+            }
+            preserve_design <- stats::model.matrix(
+                stats::reformulate(preserve_cols), data = meta
+            )
+        }
+        expr_visual <- limma::removeBatchEffect(
+            expr,
+            batch = if (is.null(batch_col)) NULL else meta[[batch_col]],
+            batch2 = if (is.null(batch2_col)) NULL else meta[[batch2_col]],
+            covariates = covariate_matrix,
+            design = preserve_design
+        )
+        if (anyNA(expr_visual) || any(!is.finite(expr_visual))) {
+            stop("Visualization correction produced non-finite values.",
+                 call. = FALSE)
+        }
+    }
+
+    heatmap_matrix <- expr_visual[selected_de$.GeneKey, , drop = FALSE]
+    if (is.null(order_by)) {
+        order_by <- group_col
+    }
+    if (!is.character(order_by) || length(order_by) == 0L ||
+        anyNA(order_by) || any(!nzchar(order_by)) || anyDuplicated(order_by)) {
+        stop("`order_by` must contain unique non-empty metadata columns.",
+             call. = FALSE)
+    }
+    missing_order_columns <- setdiff(order_by, colnames(meta))
+    if (length(missing_order_columns) > 0L) {
+        stop(
+            "Missing order_by columns: ",
+            paste(missing_order_columns, collapse = ", "), call. = FALSE
+        )
+    }
+    if (anyNA(meta[order_by])) {
+        stop("`order_by` columns cannot contain missing values.", call. = FALSE)
+    }
+    column_order_index <- do.call(order, c(meta[order_by], list(na.last = TRUE)))
+    column_order <- meta$.SampleID[column_order_index]
+    heatmap_matrix <- heatmap_matrix[, column_order, drop = FALSE]
+    column_metadata <- meta[column_order, , drop = FALSE]
+
+    if (row_zscore) {
+        row_sd <- apply(heatmap_matrix, 1L, stats::sd)
+        zero_variance <- !is.finite(row_sd) | row_sd == 0
+        if (any(zero_variance)) {
+            if (verbose) {
+                warning(
+                    sum(zero_variance),
+                    " selected genes had zero variance and were removed ",
+                    "before z-scoring.", call. = FALSE
+                )
+            }
+            heatmap_matrix <- heatmap_matrix[!zero_variance, , drop = FALSE]
+            selected_de <- selected_de[
+                selected_de$.GeneKey %in% rownames(heatmap_matrix), , drop = FALSE
+            ]
+        }
+        if (nrow(heatmap_matrix) == 0L) {
+            stop("No variable selected genes remain for row z-scoring.",
+                 call. = FALSE)
+        }
+        heatmap_scaled <- t(scale(t(heatmap_matrix)))
+    } else {
+        heatmap_scaled <- heatmap_matrix
+    }
+    if (!is.null(z_cap)) {
+        heatmap_scaled <- pmax(pmin(heatmap_scaled, z_cap), -z_cap)
+    }
+
+    selected_de <- selected_de[
+        match(rownames(heatmap_scaled), selected_de$.GeneKey), , drop = FALSE
+    ]
+    display_labels <- make.unique(selected_de$.GeneLabel)
+    rownames(heatmap_scaled) <- display_labels
+    selected_de$.DisplayLabel <- display_labels
+    row_split <- factor(
+        selected_de$.Direction, levels = c(negative_label, positive_label)
+    )
+
+    final_label_genes <- if (is.null(label_genes)) character(0) else
+        unique(as.character(label_genes))
+    final_label_genes <- final_label_genes[
+        !is.na(final_label_genes) & nzchar(final_label_genes)
+    ]
+    if (label_top_per_side > 0L) {
+        top_negative <- head(
+            rank_de(selected_de[selected_de$.Direction == negative_label,
+                                , drop = FALSE]),
+            as.integer(label_top_per_side)
+        )
+        top_positive <- head(
+            rank_de(selected_de[selected_de$.Direction == positive_label,
+                                , drop = FALSE]),
+            as.integer(label_top_per_side)
+        )
+        final_label_genes <- unique(c(
+            final_label_genes,
+            top_negative$.GeneKey,
+            top_negative$.GeneLabel,
+            top_positive$.GeneKey,
+            top_positive$.GeneLabel
+        ))
+    }
+    if (label_force_genes && length(force_genes) > 0L) {
+        final_label_genes <- unique(c(final_label_genes, force_genes))
+    }
+    label_keep <- selected_de$.GeneKey %in% final_label_genes |
+        selected_de$.GeneLabel %in% final_label_genes
+    label_indices <- which(label_keep)
+    label_text <- selected_de$.GeneLabel[label_indices]
+    gene_mark <- NULL
+    if (length(label_indices) > 0L) {
+        gene_mark <- ComplexHeatmap::rowAnnotation(
+            Gene = ComplexHeatmap::anno_mark(
+                at = label_indices,
+                labels = label_text,
+                which = "row",
+                side = label_side,
+                labels_gp = grid::gpar(
+                    fontsize = label_fontsize,
+                    fontface = if (label_italic) "italic" else "plain"
+                ),
+                link_gp = grid::gpar(col = "black", lwd = 0.6),
+                link_width = grid::unit(label_link_width_mm, "mm"),
+                padding = grid::unit(label_padding_mm, "mm"),
+                extend = grid::unit(c(2, 2), "mm")
+            )
+        )
+    }
+
+    if (is.null(annotation_cols)) {
+        annotation_cols <- group_col
+    }
+    if (!is.character(annotation_cols) || length(annotation_cols) == 0L ||
+        anyNA(annotation_cols) || any(!nzchar(annotation_cols)) ||
+        anyDuplicated(annotation_cols)) {
+        stop("`annotation_cols` must contain unique non-empty metadata columns.",
+             call. = FALSE)
+    }
+    missing_annotation_columns <- setdiff(annotation_cols, colnames(column_metadata))
+    if (length(missing_annotation_columns) > 0L) {
+        stop(
+            "Missing annotation columns: ",
+            paste(missing_annotation_columns, collapse = ", "), call. = FALSE
+        )
+    }
+    if (!is.null(annotation_colors) &&
+        (!is.list(annotation_colors) || is.null(names(annotation_colors)) ||
+         anyNA(names(annotation_colors)) || any(!nzchar(names(annotation_colors))))) {
+        stop("`annotation_colors` must be NULL or a named list.", call. = FALSE)
+    }
+    annotation_data <- column_metadata[, annotation_cols, drop = FALSE]
+    annotation_arguments <- list(
+        df = annotation_data,
+        show_annotation_name = show_annotation_name
+    )
+    if (!is.null(annotation_colors)) {
+        annotation_arguments$col <- annotation_colors
+    }
+    top_annotation <- do.call(
+        ComplexHeatmap::HeatmapAnnotation, annotation_arguments
+    )
+
+    if (!is.null(z_cap)) {
+        color_limit <- z_cap
+    } else {
+        color_limit <- max(abs(heatmap_scaled))
+        if (!is.finite(color_limit) || color_limit == 0) {
+            color_limit <- 1
+        }
+    }
+    color_function <- circlize::colorRamp2(
+        c(-color_limit, 0, color_limit), heatmap_colors
+    )
+    heatmap <- ComplexHeatmap::Heatmap(
+        heatmap_scaled,
+        name = heatmap_name,
+        col = color_function,
+        top_annotation = top_annotation,
+        split = row_split,
+        row_title = NULL,
+        row_gap = grid::unit(row_gap_mm, "mm"),
+        cluster_rows = cluster_rows,
+        cluster_row_slices = cluster_row_slices,
+        clustering_distance_rows = clustering_distance_rows,
+        clustering_method_rows = clustering_method_rows,
+        show_row_dend = show_row_dend,
+        cluster_columns = cluster_columns,
+        show_column_dend = show_column_dend,
+        show_column_names = show_column_names,
+        show_row_names = show_row_names,
+        border = border,
+        rect_gp = grid::gpar(col = cell_border, lwd = cell_border_lwd),
+        use_raster = use_raster,
+        heatmap_legend_param = list(
+            title = heatmap_legend_title,
+            title_gp = grid::gpar(fontsize = 10, fontface = "bold"),
+            labels_gp = grid::gpar(fontsize = 9)
+        )
+    )
+    heatmap_final <- if (is.null(gene_mark)) {
+        heatmap
+    } else if (label_side == "left") {
+        gene_mark + heatmap
+    } else {
+        heatmap + gene_mark
+    }
+
+    draw_heatmap <- function() {
+        ComplexHeatmap::draw(
+            heatmap_final,
+            heatmap_legend_side = "right",
+            annotation_legend_side = "right"
+        )
+    }
+    if (!is.null(save)) {
+        save_heatmap <- function() {
+            if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
+                grDevices::cairo_pdf(filename = save, width = width, height = height)
+            } else {
+                grDevices::png(
+                    filename = save,
+                    width = width,
+                    height = height,
+                    units = "in",
+                    res = 300
+                )
+            }
+            on.exit(grDevices::dev.off(), add = TRUE)
+            draw_heatmap()
+        }
+        save_heatmap()
+    }
+    if (draw_plot) {
+        draw_heatmap()
+    }
+
+    if (verbose) {
+        message("")
+        message("==========================================")
+        message(" DE heatmap")
+        message("==========================================")
+        message(
+            negative_label, ": ",
+            sum(selected_de$.Direction == negative_label), " genes"
+        )
+        message(
+            positive_label, ": ",
+            sum(selected_de$.Direction == positive_label), " genes"
+        )
+        message("Total genes: ", nrow(heatmap_scaled))
+        corrected_for <- c(batch_col, batch2_col, covariate_cols)
+        corrected_for <- corrected_for[!is.na(corrected_for)]
+        if (length(corrected_for) > 0L) {
+            message(
+                "Visualization corrected for: ",
+                paste(corrected_for, collapse = ", ")
+            )
+        }
+        if (!is.null(preserve_cols)) {
+            message("Preserved effects: ", paste(preserve_cols, collapse = ", "))
+        }
+        message("==========================================")
+    }
+
+    invisible(list(
+        heatmap = heatmap_final,
+        matrix = heatmap_scaled,
+        expression_corrected = expr_visual,
+        selected_de = selected_de,
+        metadata = column_metadata,
+        row_split = row_split,
+        labels = label_text,
+        col_fun = color_function
+    ))
 }
 
 

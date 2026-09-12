@@ -295,6 +295,7 @@ functions supplied in R.
 | Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
 | Bulk/pseudobulk quality-control visualization | `plot_bulk_qc()` | Calculates count-matrix library sizes and plots selected sample-level read, assignment, and library metrics in faceted panels. | Combined patchwork figure, individual metric plots, plotting metadata, and colour mapping. |
 | Bulk/pseudobulk expression visualization | `plot_bulk_violin()` | Calculates TMM-normalized log2 CPM and plots selected gene distributions with optional boxplots, sample points, and split facets. | Plot, long-format expression data, per-panel summaries, gene mapping, log2 CPM, DGEList, and colours. |
+| Differential-expression heatmap | `plot_de_heatmap()` | Selects directional DE genes and displays normalized sample-level expression with optional visualization-only batch correction and marked-gene labels. | ComplexHeatmap object, displayed matrix, corrected expression, selected DE rows, ordered metadata, row split, labels, and colour function. |
 | Differential-expression visualization | `plot_signed_manhattan()` | Displays signed adjusted-p-value significance for every tested gene across comparisons and sorting groups. | Plot, complete plotting data, selected labels, per-panel summary, colours, and cutoff metadata. |
 
 ### `read_featurecounts_project(...)`
@@ -608,6 +609,57 @@ This is a descriptive replicate-level view for raw bulk or replicate-aware
 pseudobulk counts. It does not replace study-design-aware differential
 expression, effect-size estimation, or biological replication checks.
 
+### `plot_de_heatmap(...)`
+
+Builds a direction-split ComplexHeatmap from an existing normalized,
+preferably log-transformed gene-by-sample expression matrix and a compatible
+differential-expression table. It selects the strongest negative and positive
+effects independently, while `force_genes` can retain biologically important
+genes that are present and have a non-zero effect direction.
+
+```r
+heatmap_result <- plot_de_heatmap(
+  expr = voom_result$voom$E,
+  meta = project$metadata,
+  de = voom_result$results,
+  gene_key_col = "gene_id",
+  gene_label_col = "gene_name",
+  group_col = "Condition",
+  group_order = c("Control", "Treated"),
+  annotation_cols = c("Condition", "Batch"),
+  max_genes_per_side = 25,
+  force_genes = c("GATA1", "SPI1"),
+  label_force_genes = TRUE,
+  save = "outputs/de_heatmap.pdf"
+)
+
+heatmap_result$selected_de
+heatmap_result$matrix
+heatmap_result$metadata
+```
+
+Automatic selection requires the adjusted-p-value and absolute log-fold-change
+cutoffs and can rank first by adjusted p-value or effect magnitude. Duplicate
+gene keys retain the row with the smallest adjusted p-value and then strongest
+absolute effect. Gene rows are split into explicitly labelled negative and
+positive directions. Row z-scores and symmetric value capping are optional;
+zero-variance genes are removed before z-scoring.
+
+`batch_col`, `batch2_col`, and numeric `covariate_cols` invoke
+`limma::removeBatchEffect()` only for the displayed expression matrix.
+Biological effects listed in `preserve_cols` are retained in that correction
+design. Neither the supplied DE statistics nor the original expression matrix
+is modified. This visualization-only correction must not be interpreted as a
+replacement for modeling batch, donors, pairing, or covariates in the original
+differential-expression analysis.
+
+The function returns the assembled heatmap, displayed matrix, complete
+corrected expression matrix, selected DE rows, ordered metadata, directional
+row split, marked labels, and colour function. Required packages are
+ComplexHeatmap and circlize, plus limma only when visualization correction is
+requested. Input expression must already be normalized/log-scale; raw counts
+must not be passed directly.
+
 ### `plot_signed_manhattan(...)`
 
 Creates a signed Manhattan-style overview of complete pairwise DE tables.
@@ -670,6 +722,7 @@ required for interpretation.
 | `BULK_PCA_MACARON_COLORS` | 15 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_pca()` and other bulk/pseudobulk visualizations. |
 | `BULK_QC_MACARON_COLORS` | 12 muted colours beginning with neutral grey | Default ordered groups in `plot_bulk_qc()`, especially when the first group is a reference or control. |
 | `BULK_VIOLIN_MACARON_COLORS` | 12 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_violin()`. |
+| `DE_HEATMAP_COLORS` | Blue, white, and muted red | Default symmetric low-midpoint-high scale in `plot_de_heatmap()`. |
 | `SIGNED_MANHATTAN_MACARON_COLORS` | 12 muted comparison colours | Default comparison labels in `plot_signed_manhattan()`. |
 
 The palette is stored as an unnamed character vector so a plotting function

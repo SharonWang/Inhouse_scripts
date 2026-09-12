@@ -8,6 +8,15 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `plot_de_heatmap()` to the R differential-expression visualization
+  section for direction-balanced gene selection and normalized sample-level
+  ComplexHeatmap output.
+- Added `DE_HEATMAP_COLORS` as the reusable blue-white-muted-red diverging
+  palette supplied with the heatmap.
+- Documented every heatmap input and returned object, normalized-expression
+  requirement, directional selection, forced genes, visualization-only batch
+  correction, row transformation, annotation, clustering, labels, export,
+  dependencies, and scientific caveats.
 - Added `plot_bulk_violin()` to the R bulk/pseudobulk visualization section
   for TMM-normalized log2-CPM distributions of requested genes, with optional
   metadata subsetting, split facets, boxplots, and reproducible sample points.
@@ -51,6 +60,12 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Reworked the supplied heatmap function into the namespace-safe R pipeline
+  style, removing its attached-pipe dependency and adding identifier,
+  statistic, metadata, cutoff, correction, ordering, annotation, palette,
+  clustering, display, and non-zero-variance safeguards.
+- Kept batch and covariate removal isolated to the visualization matrix and
+  retained the original differential-expression statistics for auditability.
 - Reworked the supplied violin function into the existing namespace-safe R
   pipeline style, with project and count validation, collision-safe metadata,
   explicit factor and palette handling, split-aware summaries, and no reliance
@@ -97,6 +112,10 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the DE heatmap input alignment, directional selection, forced-gene
+  reservation, visualization-only correction, row scaling and capping, column
+  ordering, annotations, clustering, label placement, export, returned data,
+  reusable palette, Roxygen comments, README, and Git diff before committing.
 - Reviewed the bulk violin normalization flow, gene matching, metadata joins,
   ordering, facets, plot layers, summaries, return interface, reusable palette,
   Roxygen comments, README, and Git diff before committing.
@@ -118,6 +137,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: add differential-expression heatmap` — Added the documented DE-selected
+  ComplexHeatmap utility, reusable diverging palette, safeguards, and README
+  guidance.
 - `feat: add bulk RNA-seq violin plotter` — Added the documented expression
   distribution utility, reusable palette, validation safeguards, and README
   guidance.
