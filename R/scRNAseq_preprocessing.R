@@ -75,6 +75,33 @@ BULK_QC_MACARON_COLORS <- c(
 )
 
 
+#' Macaron comparison palette for signed Manhattan plots
+#'
+#' A reusable vector of 12 muted colours supplied with
+#' [plot_signed_manhattan()]. Colours are intentionally unnamed so they can be
+#' assigned after comparison labels and their display order have been resolved.
+#'
+#' @return A character vector containing 12 hexadecimal colour values.
+#'
+#' @examples
+#' SIGNED_MANHATTAN_MACARON_COLORS
+#' SIGNED_MANHATTAN_MACARON_COLORS[seq_len(3)]
+SIGNED_MANHATTAN_MACARON_COLORS <- c(
+    "#9DB7D5", # blueberry
+    "#A8C8A0", # pistachio
+    "#E6A4A8", # strawberry
+    "#B8A1C8", # lavender
+    "#E5C07B", # vanilla
+    "#8FC7C3", # mint
+    "#D7A6C2", # raspberry
+    "#D8B4A0", # peach
+    "#A5C3D5", # sky
+    "#9FBDB0", # sage
+    "#C7B299", # caramel
+    "#C3B6D8"  # violet
+)
+
+
 # =============================================================================
 # Data loading and import
 # =============================================================================
@@ -2033,6 +2060,210 @@ limma_voom_pairwise <- function(
 }
 
 
+# Internal collector shared by the public edgeR collector and plotter.
+.collect_pairwise_results <- function(
+    de_list,
+    name_sep,
+    logfc_col,
+    padj_col,
+    allow_data_frames = FALSE,
+    require_names = TRUE
+) {
+    if (!is.list(de_list) || length(de_list) == 0L) {
+        stop("de_list must be a non-empty list of pairwise result objects.")
+    }
+    list_names <- names(de_list)
+    if (is.null(list_names)) {
+        if (require_names) {
+            stop("de_list must be named so analyses can be identified.")
+        }
+        list_names <- paste0("Analysis_", seq_along(de_list))
+    }
+    if (length(list_names) != length(de_list) || anyNA(list_names) ||
+        any(!nzchar(list_names)) || anyDuplicated(list_names)) {
+        stop("de_list names must be unique, non-missing, and non-empty.")
+    }
+
+    collected <- lapply(seq_along(de_list), function(index) {
+        analysis_name <- list_names[index]
+        object <- de_list[[index]]
+        is_pairwise_object <- is.list(object) &&
+            "results" %in% names(object) && is.data.frame(object$results)
+        if (is_pairwise_object) {
+            result <- object$results
+        } else if (allow_data_frames && is.data.frame(object)) {
+            result <- object
+        } else {
+            stop(
+                "'", analysis_name,
+                "' does not look like an edgeR_pairwise result object."
+            )
+        }
+        missing_statistics <- setdiff(c(logfc_col, padj_col), colnames(result))
+        if (length(missing_statistics) > 0L) {
+            stop(
+                "Analysis '", analysis_name, "' is missing columns: ",
+                paste(missing_statistics, collapse = ", ")
+            )
+        }
+        if (!is.numeric(result[[logfc_col]]) ||
+            !is.numeric(result[[padj_col]])) {
+            stop(
+                "Analysis '", analysis_name, "' must contain numeric ",
+                logfc_col, " and ", padj_col, " columns."
+            )
+        }
+        observed_padj <- result[[padj_col]][!is.na(result[[padj_col]])]
+        if (any(!is.finite(observed_padj)) ||
+            any(observed_padj < 0 | observed_padj > 1)) {
+            stop(
+                "Analysis '", analysis_name, "' contains invalid ",
+                padj_col, " values; observed values must be finite and in [0, 1]."
+            )
+        }
+
+        scalar_from_object <- function(field, fallback = NA_character_) {
+            if (is_pairwise_object && field %in% names(object)) {
+                value <- as.character(object[[field]])
+                if (length(value) == 1L && !is.na(value) && nzchar(value)) {
+                    return(value)
+                }
+            }
+            if (field %in% colnames(result)) {
+                value <- unique(as.character(result[[field]]))
+                value <- value[!is.na(value) & nzchar(value)]
+                if (length(value) == 1L) {
+                    return(value)
+                }
+            }
+            fallback
+        }
+        reference <- scalar_from_object("group1")
+        if (is.na(reference)) {
+            reference <- scalar_from_object("Reference")
+        }
+        comparison_group <- scalar_from_object("group2")
+        if (is.na(comparison_group)) {
+            comparison_group <- scalar_from_object("ComparisonGroup")
+        }
+        if (!allow_data_frames &&
+            (is.na(reference) || is.na(comparison_group))) {
+            stop(
+                "Analysis '", analysis_name,
+                "' must contain scalar group1 and group2 identifiers."
+            )
+        }
+        comparison <- scalar_from_object("comparison")
+        if (is.na(comparison)) {
+            comparison <- scalar_from_object("Comparison")
+        }
+        if (is.na(comparison) && !is.na(reference) &&
+            !is.na(comparison_group)) {
+            comparison <- paste0(comparison_group, "_vs_", reference)
+        }
+        if (is.na(comparison)) {
+            comparison <- analysis_name
+        }
+
+        parts <- strsplit(analysis_name, name_sep, fixed = TRUE)[[1]]
+        sorting <- parts[1]
+        result$Analysis <- analysis_name
+        result$Reference <- reference
+        result$ComparisonGroup <- comparison_group
+        result$Comparison <- comparison
+        result$Sorting <- sorting
+
+        plotting_p <- result[[padj_col]]
+        positive_p <- plotting_p[
+            !is.na(plotting_p) & is.finite(plotting_p) & plotting_p > 0
+        ]
+        replacement <- if (length(positive_p) > 0L) {
+            max(min(positive_p) / 10, .Machine$double.xmin)
+        } else {
+            .Machine$double.xmin
+        }
+        plotting_p[is.na(plotting_p)] <- 1
+        plotting_p[plotting_p <= 0] <- replacement
+        result$SignedSignificance <-
+            -log10(plotting_p) * sign(result[[logfc_col]])
+        result$GeneRowName <- rownames(result)
+        rownames(result) <- NULL
+        result
+    })
+
+    all_columns <- unique(unlist(lapply(collected, colnames), use.names = FALSE))
+    collected <- lapply(collected, function(result) {
+        missing_columns <- setdiff(all_columns, colnames(result))
+        for (column in missing_columns) {
+            result[[column]] <- NA
+        }
+        result[, all_columns, drop = FALSE]
+    })
+    output <- do.call(rbind, collected)
+    rownames(output) <- NULL
+    output
+}
+
+
+#' Collect named edgeR pairwise analyses into one result table
+#'
+#' Combine multiple [edgeR_pairwise()] return objects while recording analysis,
+#' reference, comparison, and sorting identifiers. The function also calculates
+#' a signed significance score, `-log10(FDR) * sign(logFC)`, for downstream
+#' visualization. Positive values indicate higher expression in the comparison
+#' group and negative values indicate higher expression in the reference group.
+#'
+#' @param de_list Non-empty named list of [edgeR_pairwise()] return objects.
+#'   Every object must contain a data-frame `results` element with numeric `FDR`
+#'   and `logFC` columns plus scalar `group1` and `group2` identifiers.
+#' @param name_sep Non-empty character scalar separating fields in each analysis
+#'   name. Text before the first separator is stored as `Sorting`; when the
+#'   separator is absent, the complete analysis name is used.
+#'
+#' @return A data frame formed from all input result tables. Existing result
+#'   columns are retained and the following columns are added or refreshed:
+#'   `Analysis`, `Reference`, `ComparisonGroup`, `Comparison`, `Sorting`,
+#'   `SignedSignificance`, and `GeneRowName`. Rows retain list and within-table
+#'   order, and row names are reset.
+#'
+#' @details
+#' FDR values must be missing or finite values in `[0, 1]`. Missing FDR values
+#' are assigned a plotting value of one, while exact zeros use one tenth of the
+#' smallest positive FDR across their own analysis, bounded below by machine
+#' precision. These substitutions affect only `SignedSignificance`; the
+#' original FDR column is unchanged. Result tables with different annotation
+#' columns are combined by taking their union and filling absent fields with
+#' `NA`.
+#'
+#' @examples
+#' \dontrun{
+#' combined <- collect_edgeR_pairwise(
+#'     list(
+#'         Myeloid__Treated_vs_Control = myeloid_result,
+#'         Lymphoid__Treated_vs_Control = lymphoid_result
+#'     )
+#' )
+#' head(combined)
+#' }
+#'
+#' @export
+collect_edgeR_pairwise <- function(de_list, name_sep = "__") {
+    if (!is.character(name_sep) || length(name_sep) != 1L ||
+        is.na(name_sep) || !nzchar(name_sep)) {
+        stop("name_sep must be one non-empty character string.")
+    }
+    output <- .collect_pairwise_results(
+        de_list = de_list,
+        name_sep = name_sep,
+        logfc_col = "logFC",
+        padj_col = "FDR",
+        allow_data_frames = FALSE,
+        require_names = TRUE
+    )
+    output
+}
+
+
 # =============================================================================
 # Normalization and feature selection
 # =============================================================================
@@ -3194,5 +3425,742 @@ plot_bulk_qc <- function(
         plots = plot_list,
         metadata = meta,
         colors = colors
+    )
+}
+
+
+#' Plot signed Manhattan-style summaries of pairwise differential expression
+#'
+#' Combine one or more pairwise differential-expression results and display
+#' every tested gene by an x-axis ordering and signed adjusted-p-value score.
+#' Positive values denote higher expression in the comparison group; negative
+#' values denote higher expression in the reference group. Comparisons are
+#' shown in columns and can additionally be faceted by sorting or cell group.
+#'
+#' @param de_list A non-empty list of [edgeR_pairwise()] objects or result data
+#'   frames. List names identify analyses. Alternatively, a data frame returned
+#'   by [collect_edgeR_pairwise()] can be supplied directly.
+#' @param name_sep Non-empty character scalar separating fields in analysis
+#'   names. Text before the first separator is used as `Sorting` when collecting
+#'   a list.
+#' @param gene_col Character scalar naming the preferred gene-label column.
+#'   Missing or empty labels fall back to the gene key.
+#' @param gene_id_col Character scalar naming the preferred stable gene-ID
+#'   column. When absent, original result row names are used.
+#' @param logfc_col Character scalar naming the numeric log2-fold-change column.
+#' @param padj_col Character scalar naming the numeric adjusted-p-value column.
+#'   Observed values must be finite and between zero and one.
+#' @param sorting_order `NULL` or a unique character vector ordering sorting
+#'   groups. Observed groups omitted from the vector are appended in first-seen
+#'   order.
+#' @param comparison_order `NULL` or a unique character vector ordering raw
+#'   comparison identifiers. Omitted observed comparisons are appended.
+#' @param comparison_labels `NULL`, an unnamed character vector aligned to
+#'   `comparison_order`, or a named character vector mapping raw comparisons to
+#'   unique display labels.
+#' @param gene_order Character scalar selecting x-axis order: `"mean_logFC"`
+#'   uses each gene's mean effect across all panels; `"alphabetical"` sorts by
+#'   gene label; `"input"` keeps first appearance; and `"panel_logFC"` orders
+#'   effects independently within each sorting-by-comparison panel.
+#' @param fdr_cutoff Numeric scalar in `(0, 1]` defining adjusted-p-value
+#'   significance and the optional horizontal threshold lines.
+#' @param logfc_cutoff Non-negative numeric scalar defining the minimum absolute
+#'   log2 fold change for significant-direction labels. A value of zero uses
+#'   strictly positive or negative effects.
+#' @param colors `NULL` or a character colour vector. Unnamed values are assigned
+#'   in display-label order. Named values may use either raw comparison names or
+#'   display labels. The default uses `SIGNED_MANHATTAN_MACARON_COLORS` for up
+#'   to 12 comparisons and a pastel HCL palette thereafter.
+#' @param ns_alpha,sig_alpha Numeric scalars in `[0, 1]` controlling opacity for
+#'   non-significant and significant genes.
+#' @param point_size Positive numeric scalar controlling point size.
+#' @param rasterized Logical scalar. Whether to use `ggrastr` point layers;
+#'   when `ggrastr` is unavailable, a warning is issued and vector points are
+#'   used.
+#' @param raster_dpi Positive integer passed to `ggrastr` as raster resolution.
+#' @param label_top_up,label_top_down Non-negative integers giving the maximum
+#'   number of positive- and negative-effect genes labelled per panel, ranked
+#'   by signed significance.
+#' @param label_genes `NULL` or a character vector of additional gene labels or
+#'   stable IDs to label in every matching panel.
+#' @param label_only_significant Logical scalar. Whether automatic top-gene
+#'   labels are restricted to genes meeting both cutoffs. Manually requested
+#'   genes are not restricted.
+#' @param label_size Positive numeric scalar controlling gene-label text size.
+#' @param italic_gene_labels Logical scalar. Whether gene labels use italic text.
+#' @param cap_y `NULL` or a positive numeric scalar. Scores outside
+#'   `[-cap_y, cap_y]` are clipped for display and marked in the returned
+#'   `Capped` column; uncapped values remain in `SignedLogFDR`.
+#' @param facet_by_sorting Logical scalar. When multiple sorting groups are
+#'   present, whether to use sorting rows and comparison columns.
+#' @param facet_ncol `NULL` or a positive integer controlling comparison columns
+#'   when `facet_wrap()` is used. The default places all comparisons in one row.
+#' @param facet_scales One of `"fixed"`, `"free"`, `"free_x"`, or `"free_y"`.
+#' @param show_zero_line,show_fdr_line Logical scalars controlling the neutral
+#'   zero reference and symmetric adjusted-p-value cutoff lines.
+#' @param title `NULL` or a character scalar used as the plot title.
+#' @param x_title Character scalar used as the x-axis title.
+#' @param width Positive numeric scalar giving saved figure width in inches.
+#' @param height `NULL` or a positive numeric scalar giving saved figure height
+#'   in inches. The default is 3.5 inches for a single row or at least 2.2
+#'   inches per sorting row.
+#' @param save `NULL` or a character scalar giving an output figure path. PDF
+#'   files use `grDevices::cairo_pdf`; other formats are written at 300 dpi.
+#' @param verbose Logical scalar. Whether to print analysis counts, cutoffs, and
+#'   a per-panel significance summary.
+#'
+#' @return A named list containing:
+#'   \describe{
+#'     \item{plot}{The assembled `ggplot` object.}
+#'     \item{data}{The complete plotting data with gene keys, display labels,
+#'       x positions, signed scores, significance classes, and cap indicators.}
+#'     \item{labels}{Rows selected for gene labelling.}
+#'     \item{summary}{Per-sorting/per-comparison counts of tested, significant,
+#'       comparison-up, and reference-up genes.}
+#'     \item{colors}{Named colours used for displayed comparisons.}
+#'     \item{comparison_labels}{Named raw-to-display comparison mapping.}
+#'     \item{fdr_cutoff}{Adjusted-p-value cutoff used by the plot.}
+#'     \item{logfc_cutoff}{Absolute log2-fold-change cutoff used by the plot.}
+#'   }
+#'
+#' @details
+#' Exact adjusted p-values of zero are replaced only for plotting by one tenth
+#' of the smallest positive value in the combined data, bounded by machine
+#' precision. Original adjusted p-values and fold changes are retained. The
+#' signed display is a compact exploratory overview across analyses; effect
+#' sizes, uncertainty, replication, model design, and full result tables remain
+#' necessary for biological interpretation. Required packages are `ggplot2`
+#' and, when labels are requested, `ggrepel`.
+#'
+#' @examples
+#' \dontrun{
+#' signed_plot <- plot_signed_manhattan(
+#'     list(
+#'         Myeloid__Treated_vs_Control = myeloid_result,
+#'         Lymphoid__Treated_vs_Control = lymphoid_result
+#'     ),
+#'     comparison_order = "Treated_vs_Control",
+#'     comparison_labels = c(Treated_vs_Control = "Treated vs Control"),
+#'     label_top_up = 5,
+#'     label_top_down = 5,
+#'     cap_y = 25,
+#'     save = "outputs/signed_manhattan.pdf"
+#' )
+#' signed_plot$plot
+#' signed_plot$summary
+#' }
+#'
+#' @export
+plot_signed_manhattan <- function(
+    de_list,
+    name_sep = "__",
+    gene_col = "gene_name",
+    gene_id_col = "gene_id",
+    logfc_col = "logFC",
+    padj_col = "FDR",
+    sorting_order = NULL,
+    comparison_order = NULL,
+    comparison_labels = NULL,
+    gene_order = c("mean_logFC", "alphabetical", "input", "panel_logFC"),
+    fdr_cutoff = 0.05,
+    logfc_cutoff = 0,
+    colors = NULL,
+    ns_alpha = 0.22,
+    sig_alpha = 0.85,
+    point_size = 0.55,
+    rasterized = FALSE,
+    raster_dpi = 300,
+    label_top_up = 5,
+    label_top_down = 5,
+    label_genes = NULL,
+    label_only_significant = TRUE,
+    label_size = 2.5,
+    italic_gene_labels = TRUE,
+    cap_y = NULL,
+    facet_by_sorting = TRUE,
+    facet_ncol = NULL,
+    facet_scales = "fixed",
+    show_zero_line = TRUE,
+    show_fdr_line = TRUE,
+    title = NULL,
+    x_title = "Genes",
+    width = 10,
+    height = NULL,
+    save = NULL,
+    verbose = TRUE
+) {
+    gene_order <- match.arg(gene_order)
+    if (!requireNamespace("ggplot2", quietly = TRUE)) {
+        stop("Package 'ggplot2' is required.")
+    }
+
+    scalar_character <- function(x) {
+        is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+    }
+    scalar_logical <- function(x) {
+        is.logical(x) && length(x) == 1L && !is.na(x)
+    }
+    column_arguments <- list(
+        name_sep = name_sep,
+        gene_col = gene_col,
+        gene_id_col = gene_id_col,
+        logfc_col = logfc_col,
+        padj_col = padj_col,
+        x_title = x_title
+    )
+    invalid_columns <- names(column_arguments)[
+        !vapply(column_arguments, scalar_character, logical(1))
+    ]
+    if (length(invalid_columns) > 0L) {
+        stop(
+            paste(invalid_columns, collapse = ", "),
+            " must be non-empty character scalars."
+        )
+    }
+    if (!is.null(title) && !scalar_character(title)) {
+        stop("title must be NULL or one non-empty character string.")
+    }
+    if (!is.null(save) && !scalar_character(save)) {
+        stop("save must be NULL or one non-empty character path.")
+    }
+    logical_arguments <- list(
+        rasterized = rasterized,
+        label_only_significant = label_only_significant,
+        italic_gene_labels = italic_gene_labels,
+        facet_by_sorting = facet_by_sorting,
+        show_zero_line = show_zero_line,
+        show_fdr_line = show_fdr_line,
+        verbose = verbose
+    )
+    invalid_logical <- names(logical_arguments)[
+        !vapply(logical_arguments, scalar_logical, logical(1))
+    ]
+    if (length(invalid_logical) > 0L) {
+        stop(
+            paste(invalid_logical, collapse = ", "),
+            " must be non-missing logical scalars."
+        )
+    }
+    validate_positive <- function(value, argument_name, allow_null = FALSE) {
+        if (allow_null && is.null(value)) {
+            return(invisible(NULL))
+        }
+        if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
+            !is.finite(value) || value <= 0) {
+            stop(argument_name, " must be a positive finite numeric scalar.")
+        }
+        invisible(NULL)
+    }
+    validate_positive(point_size, "point_size")
+    validate_positive(label_size, "label_size")
+    validate_positive(width, "width")
+    validate_positive(height, "height", allow_null = TRUE)
+    validate_positive(cap_y, "cap_y", allow_null = TRUE)
+    for (alpha_name in c("ns_alpha", "sig_alpha")) {
+        alpha <- get(alpha_name)
+        if (!is.numeric(alpha) || length(alpha) != 1L || is.na(alpha) ||
+            !is.finite(alpha) || alpha < 0 || alpha > 1) {
+            stop(alpha_name, " must be a finite numeric scalar in [0, 1].")
+        }
+    }
+    if (!is.numeric(fdr_cutoff) || length(fdr_cutoff) != 1L ||
+        is.na(fdr_cutoff) || !is.finite(fdr_cutoff) ||
+        fdr_cutoff <= 0 || fdr_cutoff > 1) {
+        stop("fdr_cutoff must be a finite numeric scalar in (0, 1].")
+    }
+    if (!is.numeric(logfc_cutoff) || length(logfc_cutoff) != 1L ||
+        is.na(logfc_cutoff) || !is.finite(logfc_cutoff) || logfc_cutoff < 0) {
+        stop("logfc_cutoff must be a finite non-negative numeric scalar.")
+    }
+    integer_arguments <- list(
+        raster_dpi = raster_dpi,
+        label_top_up = label_top_up,
+        label_top_down = label_top_down
+    )
+    for (argument_name in names(integer_arguments)) {
+        value <- integer_arguments[[argument_name]]
+        minimum <- if (argument_name == "raster_dpi") 1 else 0
+        if (!is.numeric(value) || length(value) != 1L || is.na(value) ||
+            !is.finite(value) || value < minimum || value != round(value)) {
+            stop(argument_name, " has an invalid integer value.")
+        }
+    }
+    if (!is.null(facet_ncol) &&
+        (!is.numeric(facet_ncol) || length(facet_ncol) != 1L ||
+            is.na(facet_ncol) || !is.finite(facet_ncol) ||
+            facet_ncol < 1 || facet_ncol != round(facet_ncol))) {
+        stop("facet_ncol must be NULL or a positive integer.")
+    }
+    facet_scales <- match.arg(
+        facet_scales, c("fixed", "free", "free_x", "free_y")
+    )
+    if (!is.null(label_genes) &&
+        (!is.character(label_genes) || anyNA(label_genes) ||
+            any(!nzchar(label_genes)))) {
+        stop("label_genes must be NULL or non-empty character identifiers.")
+    }
+
+    use_labels <- label_top_up > 0 || label_top_down > 0 ||
+        !is.null(label_genes)
+    if (use_labels && !requireNamespace("ggrepel", quietly = TRUE)) {
+        stop("Package 'ggrepel' is required for gene labels.")
+    }
+    if (rasterized && !requireNamespace("ggrastr", quietly = TRUE)) {
+        warning("ggrastr is not installed; using normal ggplot2 points instead.")
+        rasterized <- FALSE
+    }
+
+    if (is.data.frame(de_list)) {
+        df <- de_list
+        required_collection <- c(
+            "Analysis", "Sorting", "Reference", "ComparisonGroup", "Comparison"
+        )
+        missing_collection <- setdiff(required_collection, colnames(df))
+        if (length(missing_collection) > 0L) {
+            stop(
+                "A collected data frame is missing columns: ",
+                paste(missing_collection, collapse = ", ")
+            )
+        }
+        analysis_count <- length(unique(df$Analysis))
+    } else {
+        df <- .collect_pairwise_results(
+            de_list = de_list,
+            name_sep = name_sep,
+            logfc_col = logfc_col,
+            padj_col = padj_col,
+            allow_data_frames = TRUE,
+            require_names = FALSE
+        )
+        analysis_count <- length(de_list)
+    }
+    missing_statistics <- setdiff(c(logfc_col, padj_col), colnames(df))
+    if (length(missing_statistics) > 0L) {
+        stop(
+            "Combined results are missing columns: ",
+            paste(missing_statistics, collapse = ", ")
+        )
+    }
+    if (!is.numeric(df[[logfc_col]]) || !is.numeric(df[[padj_col]])) {
+        stop("logfc_col and padj_col must identify numeric columns.")
+    }
+    observed_padj <- df[[padj_col]][!is.na(df[[padj_col]])]
+    if (any(!is.finite(observed_padj)) ||
+        any(observed_padj < 0 | observed_padj > 1)) {
+        stop("Observed adjusted p-values must be finite and in [0, 1].")
+    }
+    df <- df[
+        is.finite(df[[logfc_col]]) & !is.na(df[[padj_col]]),
+        ,
+        drop = FALSE
+    ]
+    if (nrow(df) == 0L) {
+        stop("No rows with finite log fold changes and observed FDR remain.")
+    }
+
+    gene_key <- if (gene_id_col %in% colnames(df)) {
+        as.character(df[[gene_id_col]])
+    } else if ("GeneRowName" %in% colnames(df)) {
+        as.character(df$GeneRowName)
+    } else {
+        rownames(df)
+    }
+    bad_key <- is.na(gene_key) | !nzchar(gene_key)
+    gene_key[bad_key] <- paste0(
+        as.character(df$Analysis[bad_key]), "__row_", which(bad_key)
+    )
+    gene_label <- if (gene_col %in% colnames(df)) {
+        as.character(df[[gene_col]])
+    } else {
+        gene_key
+    }
+    bad_label <- is.na(gene_label) | !nzchar(gene_label)
+    gene_label[bad_label] <- gene_key[bad_label]
+    df$.GeneKey <- gene_key
+    df$.GeneLabel <- gene_label
+
+    positive_fdr <- df[[padj_col]][df[[padj_col]] > 0]
+    replacement_fdr <- if (length(positive_fdr) > 0L) {
+        max(min(positive_fdr) / 10, .Machine$double.xmin)
+    } else {
+        .Machine$double.xmin
+    }
+    df$.PlotFDR <- df[[padj_col]]
+    df$.PlotFDR[df$.PlotFDR <= 0] <- replacement_fdr
+    df$SignedLogFDR <- -log10(df$.PlotFDR) * sign(df[[logfc_col]])
+    df$Significance <- "NS"
+    significant <- df[[padj_col]] < fdr_cutoff
+    if (logfc_cutoff == 0) {
+        up <- significant & df[[logfc_col]] > 0
+        down <- significant & df[[logfc_col]] < 0
+    } else {
+        up <- significant & df[[logfc_col]] >= logfc_cutoff
+        down <- significant & df[[logfc_col]] <= -logfc_cutoff
+    }
+    df$Significance[up] <- "Up"
+    df$Significance[down] <- "Down"
+
+    validate_order <- function(requested, observed, argument_name) {
+        if (is.null(requested)) {
+            return(observed)
+        }
+        if (!is.character(requested) || anyNA(requested) ||
+            any(!nzchar(requested)) || anyDuplicated(requested)) {
+            stop(argument_name, " must contain unique, non-empty labels.")
+        }
+        c(requested, setdiff(observed, requested))
+    }
+    observed_sorting <- unique(as.character(df$Sorting))
+    observed_comparison <- unique(as.character(df$Comparison))
+    if (anyNA(observed_sorting) || any(!nzchar(observed_sorting)) ||
+        anyNA(observed_comparison) || any(!nzchar(observed_comparison))) {
+        stop("Sorting and Comparison identifiers must be non-missing and non-empty.")
+    }
+    sorting_order <- validate_order(
+        sorting_order, observed_sorting, "sorting_order"
+    )
+    comparison_order <- validate_order(
+        comparison_order, observed_comparison, "comparison_order"
+    )
+    df$Sorting <- factor(df$Sorting, levels = sorting_order)
+    df$Comparison <- factor(df$Comparison, levels = comparison_order)
+
+    if (is.null(comparison_labels)) {
+        label_map <- stats::setNames(comparison_order, comparison_order)
+    } else if (is.null(names(comparison_labels))) {
+        if (!is.character(comparison_labels) || anyNA(comparison_labels) ||
+            length(comparison_labels) != length(comparison_order) ||
+            any(!nzchar(comparison_labels))) {
+            stop(
+                "Unnamed comparison_labels must provide one non-empty label ",
+                "per comparison_order value."
+            )
+        }
+        label_map <- stats::setNames(comparison_labels, comparison_order)
+    } else {
+        if (!is.character(comparison_labels) || anyNA(comparison_labels) ||
+            any(!nzchar(comparison_labels)) ||
+            anyNA(names(comparison_labels)) ||
+            any(!nzchar(names(comparison_labels))) ||
+            anyDuplicated(names(comparison_labels))) {
+            stop("Named comparison_labels must contain valid unique names.")
+        }
+        label_map <- comparison_labels
+        missing_labels <- setdiff(comparison_order, names(label_map))
+        label_map[missing_labels] <- missing_labels
+        label_map <- label_map[comparison_order]
+    }
+    comparison_display_order <- unname(label_map[comparison_order])
+    if (anyDuplicated(comparison_display_order)) {
+        stop("comparison_labels must produce unique display labels.")
+    }
+    df$ComparisonLabel <- factor(
+        unname(label_map[as.character(df$Comparison)]),
+        levels = comparison_display_order
+    )
+    display_levels <- levels(df$ComparisonLabel)
+
+    if (is.null(colors)) {
+        if (length(display_levels) <= length(SIGNED_MANHATTAN_MACARON_COLORS)) {
+            colors <- SIGNED_MANHATTAN_MACARON_COLORS[seq_along(display_levels)]
+        } else {
+            colors <- grDevices::hcl.colors(
+                length(display_levels), palette = "Pastel 1"
+            )
+        }
+        names(colors) <- display_levels
+    } else {
+        if (!is.character(colors) || length(colors) == 0L || anyNA(colors)) {
+            stop("colors must be a non-empty character vector without NA.")
+        }
+        if (is.null(names(colors))) {
+            if (length(colors) < length(display_levels)) {
+                stop("Not enough colors supplied. Need ", length(display_levels), ".")
+            }
+            colors <- colors[seq_along(display_levels)]
+            names(colors) <- display_levels
+        } else {
+            if (anyNA(names(colors)) || any(!nzchar(names(colors))) ||
+                anyDuplicated(names(colors))) {
+                stop("Named colors must have unique, non-empty names.")
+            }
+            if (all(comparison_order %in% names(colors)) &&
+                !all(display_levels %in% names(colors))) {
+                colors <- colors[comparison_order]
+                names(colors) <- comparison_display_order
+            }
+            missing_colors <- setdiff(display_levels, names(colors))
+            if (length(missing_colors) > 0L) {
+                stop("Missing colors for: ", paste(missing_colors, collapse = ", "))
+            }
+            colors <- colors[display_levels]
+        }
+    }
+
+    if (gene_order == "mean_logFC") {
+        gene_means <- tapply(df[[logfc_col]], df$.GeneKey, mean, na.rm = TRUE)
+        gene_key_order <- names(sort(gene_means, decreasing = FALSE))
+        df$GeneIndex <- match(df$.GeneKey, gene_key_order)
+    } else if (gene_order == "alphabetical") {
+        gene_labels <- tapply(df$.GeneLabel, df$.GeneKey, function(x) x[1])
+        gene_key_order <- names(sort(gene_labels))
+        df$GeneIndex <- match(df$.GeneKey, gene_key_order)
+    } else if (gene_order == "input") {
+        gene_key_order <- unique(df$.GeneKey)
+        df$GeneIndex <- match(df$.GeneKey, gene_key_order)
+    } else {
+        df$GeneIndex <- NA_integer_
+        panel_indices <- split(
+            seq_len(nrow(df)),
+            interaction(df$Sorting, df$ComparisonLabel, drop = TRUE)
+        )
+        for (indices in panel_indices) {
+            ordered_indices <- indices[
+                order(df[[logfc_col]][indices], decreasing = FALSE)
+            ]
+            df$GeneIndex[ordered_indices] <- seq_along(ordered_indices)
+        }
+    }
+
+    df$SignedLogFDR_plot <- df$SignedLogFDR
+    df$Capped <- FALSE
+    if (!is.null(cap_y)) {
+        df$Capped <- abs(df$SignedLogFDR) > cap_y
+        df$SignedLogFDR_plot <- pmax(pmin(df$SignedLogFDR, cap_y), -cap_y)
+    }
+
+    panel_indices <- split(
+        seq_len(nrow(df)),
+        interaction(df$Sorting, df$ComparisonLabel, drop = TRUE)
+    )
+    label_rows <- integer(0)
+    for (indices in panel_indices) {
+        candidates <- if (label_only_significant) {
+            indices[df$Significance[indices] != "NS"]
+        } else {
+            indices
+        }
+        positive <- candidates[df[[logfc_col]][candidates] > 0]
+        negative <- candidates[df[[logfc_col]][candidates] < 0]
+        if (label_top_up > 0 && length(positive) > 0L) {
+            positive <- positive[
+                order(df$SignedLogFDR[positive], decreasing = TRUE)
+            ]
+            label_rows <- c(label_rows, head(positive, label_top_up))
+        }
+        if (label_top_down > 0 && length(negative) > 0L) {
+            negative <- negative[
+                order(df$SignedLogFDR[negative], decreasing = FALSE)
+            ]
+            label_rows <- c(label_rows, head(negative, label_top_down))
+        }
+    }
+    if (!is.null(label_genes)) {
+        label_rows <- c(
+            label_rows,
+            which(df$.GeneLabel %in% label_genes | df$.GeneKey %in% label_genes)
+        )
+    }
+    label_rows <- unique(label_rows)
+    label_df <- df[label_rows, , drop = FALSE]
+
+    plot <- ggplot2::ggplot(
+        df,
+        ggplot2::aes(x = GeneIndex, y = SignedLogFDR_plot)
+    )
+    if (show_zero_line) {
+        plot <- plot + ggplot2::geom_hline(
+            yintercept = 0, linewidth = 0.4, colour = "#777777"
+        )
+    }
+    if (show_fdr_line) {
+        fdr_line <- -log10(fdr_cutoff)
+        plot <- plot + ggplot2::geom_hline(
+            yintercept = c(-fdr_line, fdr_line),
+            linewidth = 0.35,
+            linetype = "dashed",
+            colour = "#A0A0A0"
+        )
+    }
+    non_significant <- df[df$Significance == "NS", , drop = FALSE]
+    significant_data <- df[df$Significance != "NS", , drop = FALSE]
+    if (rasterized) {
+        plot <- plot +
+            ggrastr::geom_point_rast(
+                data = non_significant,
+                ggplot2::aes(colour = ComparisonLabel),
+                size = point_size,
+                alpha = ns_alpha,
+                raster.dpi = raster_dpi
+            ) +
+            ggrastr::geom_point_rast(
+                data = significant_data,
+                ggplot2::aes(colour = ComparisonLabel),
+                size = point_size * 1.15,
+                alpha = sig_alpha,
+                raster.dpi = raster_dpi
+            )
+    } else {
+        plot <- plot +
+            ggplot2::geom_point(
+                data = non_significant,
+                ggplot2::aes(colour = ComparisonLabel),
+                size = point_size,
+                alpha = ns_alpha,
+                stroke = 0
+            ) +
+            ggplot2::geom_point(
+                data = significant_data,
+                ggplot2::aes(colour = ComparisonLabel),
+                size = point_size * 1.15,
+                alpha = sig_alpha,
+                stroke = 0
+            )
+    }
+    if (nrow(label_df) > 0L) {
+        plot <- plot + ggrepel::geom_text_repel(
+            data = label_df,
+            ggplot2::aes(
+                x = GeneIndex,
+                y = SignedLogFDR_plot,
+                label = .GeneLabel
+            ),
+            inherit.aes = FALSE,
+            colour = "black",
+            size = label_size,
+            fontface = if (italic_gene_labels) "italic" else "plain",
+            box.padding = 0.25,
+            point.padding = 0.15,
+            min.segment.length = 0,
+            segment.linewidth = 0.25,
+            segment.colour = "#777777",
+            max.overlaps = Inf,
+            show.legend = FALSE
+        )
+    }
+
+    n_sorting <- length(unique(as.character(df$Sorting)))
+    if (facet_by_sorting && n_sorting > 1L) {
+        plot <- plot + ggplot2::facet_grid(
+            Sorting ~ ComparisonLabel, scales = facet_scales
+        )
+    } else {
+        if (is.null(facet_ncol)) {
+            facet_ncol <- length(display_levels)
+        }
+        plot <- plot + ggplot2::facet_wrap(
+            ~ComparisonLabel,
+            ncol = as.integer(facet_ncol),
+            scales = facet_scales
+        )
+    }
+    y_axis_title <- if (identical(padj_col, "FDR") &&
+        identical(logfc_col, "logFC")) {
+        expression(-log[10](FDR) %*% sign(logFC))
+    } else {
+        paste0("-log10(", padj_col, ") x sign(", logfc_col, ")")
+    }
+    plot <- plot +
+        ggplot2::scale_colour_manual(values = colors, drop = FALSE) +
+        ggplot2::labs(
+            x = x_title,
+            y = y_axis_title,
+            colour = NULL,
+            title = title
+        ) +
+        ggplot2::theme_classic(base_size = 9) +
+        ggplot2::theme(
+            panel.grid = ggplot2::element_blank(),
+            axis.line = ggplot2::element_line(colour = "black", linewidth = 0.5),
+            axis.ticks = ggplot2::element_line(colour = "black", linewidth = 0.4),
+            axis.ticks.length = grid::unit(1.5, "mm"),
+            axis.text.y = ggplot2::element_text(colour = "black", size = 7.5),
+            axis.text.x = ggplot2::element_blank(),
+            axis.ticks.x = ggplot2::element_blank(),
+            axis.title = ggplot2::element_text(colour = "black", size = 9),
+            strip.background = ggplot2::element_blank(),
+            strip.text.x = ggplot2::element_text(
+                colour = "black", face = "bold", size = 8.5
+            ),
+            strip.text.y = ggplot2::element_text(
+                colour = "black", face = "bold", size = 8.5
+            ),
+            plot.title = ggplot2::element_text(
+                colour = "black", face = "bold", size = 10, hjust = 0
+            ),
+            legend.position = "none",
+            plot.margin = ggplot2::margin(5.5, 10, 5.5, 5.5)
+        )
+
+    if (is.null(height)) {
+        height <- if (facet_by_sorting && n_sorting > 1L) {
+            max(3.5, n_sorting * 2.2)
+        } else {
+            3.5
+        }
+    }
+    if (!is.null(save)) {
+        if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
+            ggplot2::ggsave(
+                filename = save,
+                plot = plot,
+                width = width,
+                height = height,
+                units = "in",
+                device = grDevices::cairo_pdf
+            )
+        } else {
+            ggplot2::ggsave(
+                filename = save,
+                plot = plot,
+                width = width,
+                height = height,
+                units = "in",
+                dpi = 300
+            )
+        }
+    }
+
+    summary_indices <- split(
+        seq_len(nrow(df)),
+        interaction(df$Sorting, df$ComparisonLabel, drop = TRUE)
+    )
+    summary_df <- do.call(rbind, lapply(summary_indices, function(indices) {
+        data.frame(
+            Sorting = as.character(df$Sorting[indices[1]]),
+            ComparisonLabel = as.character(df$ComparisonLabel[indices[1]]),
+            Genes_tested = length(indices),
+            Significant = sum(df$Significance[indices] != "NS"),
+            Up_comparison = sum(df$Significance[indices] == "Up"),
+            Up_reference = sum(df$Significance[indices] == "Down"),
+            stringsAsFactors = FALSE
+        )
+    }))
+    rownames(summary_df) <- NULL
+
+    if (verbose) {
+        message("")
+        message("============================================")
+        message(" Signed Manhattan plot")
+        message("============================================")
+        message("Analyses:       ", analysis_count)
+        message("Sorting groups: ", n_sorting)
+        message("Comparisons:    ", length(display_levels))
+        message("FDR cutoff:     ", fdr_cutoff)
+        message("logFC cutoff:   ", logfc_cutoff)
+        message("")
+        print(summary_df)
+        message("============================================")
+    }
+
+    list(
+        plot = plot,
+        data = df,
+        labels = label_df,
+        summary = summary_df,
+        colors = colors,
+        comparison_labels = label_map,
+        fdr_cutoff = fdr_cutoff,
+        logfc_cutoff = logfc_cutoff
     )
 }

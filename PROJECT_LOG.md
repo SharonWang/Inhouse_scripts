@@ -8,6 +8,15 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `collect_edgeR_pairwise()` and its internal shared collector to combine
+  named edgeR analyses with explicit reference, comparison, sorting, original
+  gene-row, and signed-significance fields.
+- Added `plot_signed_manhattan()` for directional adjusted-p-value overviews
+  across pairwise comparisons and sorting groups, with four gene-order modes,
+  symmetric thresholds, per-panel labels, optional y capping and rasterization,
+  flexible facets, and complete returned plotting data and summaries.
+- Added `SIGNED_MANHATTAN_MACARON_COLORS` as the reusable 12-colour comparison
+  palette supplied with the signed Manhattan plot.
 - Added `plot_bulk_qc()` to the R visualization section for faceted
   sample-level read, assignment, and count-matrix library-size QC panels.
 - Added the reusable 12-colour `BULK_QC_MACARON_COLORS` R palette, preserving
@@ -34,6 +43,15 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Preserved original fold changes and FDR values while protecting signed plots
+  from exact zero FDR values using a bounded plotting-only replacement.
+- Centralized list extraction for the collector and plotter, while allowing the
+  plotter to accept a previously collected table or compatible named result
+  data frames and retaining differing annotation columns across analyses.
+- Removed the supplied plotter's dplyr dependency by constructing its per-panel
+  significance summary with base R.
+- Added identifier, statistic, cutoff, ordering, label-map, palette, facet,
+  rasterization, and numeric-layout safeguards to both DE overview utilities.
 - Recalculated `LibrarySize` from the aligned count matrix on every QC call and
   removed unused dplyr and tidyr requirements from the supplied function.
 - Added project-alignment, count-integrity, metric-type, finite-value,
@@ -60,6 +78,9 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the edgeR collection provenance, effect direction, FDR-zero handling,
+  gene ordering, label selection, facet structure, plotting layers, reusable
+  palette, Roxygen interfaces, README examples, and Git diff before committing.
 - Reviewed the bulk QC data flow, requested metrics, faceting and line grouping,
   reusable palette, Roxygen interface, README example, and Git diff before
   committing.
@@ -71,6 +92,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: add pairwise DE collector and signed Manhattan plot` — Added the two
+  documented DE overview utilities, shared extraction, reusable palette,
+  safeguards, and README guidance.
 - `feat: add bulk RNA-seq QC plotter` — Added the documented faceted QC
   utility, reusable grey-first macaron palette, safeguards, and README guide.
 - `feat: add bulk RNA-seq PCA plotter` — Added the documented PCA utility,

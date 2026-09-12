@@ -291,8 +291,10 @@ functions supplied in R.
 | Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
 | Pairwise differential expression | `edgeR_pairwise()` | Runs comparison-specific filtering, TMM normalization, dispersion estimation, and an edgeR quasi-likelihood test. | Annotated results plus DGEList, fit, test, design, contrast, and sample details. |
 | Pairwise differential expression | `limma_voom_pairwise()` | Runs comparison-specific filtering, TMM normalization, voom weighting, and a limma empirical Bayes test. | Annotated results plus DGEList, voom data, fit, design, contrast, and sample details. |
+| Differential-expression collection | `collect_edgeR_pairwise()` | Combines named edgeR pairwise results with analysis, sorting, contrast, provenance, and signed-significance fields. | One row-bound data frame retaining all result and annotation columns. |
 | Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
 | Bulk/pseudobulk quality-control visualization | `plot_bulk_qc()` | Calculates count-matrix library sizes and plots selected sample-level read, assignment, and library metrics in faceted panels. | Combined patchwork figure, individual metric plots, plotting metadata, and colour mapping. |
+| Differential-expression visualization | `plot_signed_manhattan()` | Displays signed adjusted-p-value significance for every tested gene across comparisons and sorting groups. | Plot, complete plotting data, selected labels, per-panel summary, colours, and cutoff metadata. |
 
 ### `read_featurecounts_project(...)`
 
@@ -456,6 +458,35 @@ Dependencies are edgeR for `edgeR_pairwise()` and edgeR plus limma for
 `limma_voom_pairwise()`. Robust limma empirical Bayes estimation may also use
 statmod through limma.
 
+#### `collect_edgeR_pairwise(de_list, name_sep="__")`
+
+Combines a named list of `edgeR_pairwise()` outputs into one analysis-ready
+table. The collector records the list name, reference and comparison groups,
+standardized comparison, sorting identifier parsed from the list name, and
+original gene row name. It also calculates signed significance as
+`-log10(FDR) * sign(logFC)`.
+
+```r
+combined_de <- collect_edgeR_pairwise(
+  list(
+    Myeloid__Treated_vs_Control = myeloid_result,
+    Lymphoid__Treated_vs_Control = lymphoid_result
+  )
+)
+
+head(combined_de[, c(
+  "Analysis", "Sorting", "Comparison", "logFC", "FDR",
+  "SignedSignificance"
+)])
+```
+
+Analysis names must be unique and non-empty, and each object must retain its
+`group1`, `group2`, and numeric `logFC` and `FDR` fields. FDR values must be in
+the interval zero to one. Exact zeros are replaced only when calculating the
+finite plotting score; original FDR values remain unchanged. Annotation
+columns that differ between results are preserved through a union of fields
+with missing entries filled by `NA`.
+
 ### `plot_bulk_pca(...)`
 
 Creates an exploratory sample-level PCA from the raw bulk or pseudobulk counts
@@ -535,12 +566,60 @@ named colour mapping. It does not modify the input project or apply QC
 exclusion thresholds. Required packages are ggplot2, patchwork, and scales;
 PDF output uses Cairo and other figure formats are saved at 300 dpi.
 
+### `plot_signed_manhattan(...)`
+
+Creates a signed Manhattan-style overview of complete pairwise DE tables.
+Positive values indicate higher expression in the comparison group and
+negative values indicate higher expression in the reference group. The
+function accepts a list of edgeR results, a named list of compatible result
+data frames, or the table returned by `collect_edgeR_pairwise()`.
+
+```r
+manhattan_result <- plot_signed_manhattan(
+  list(
+    Myeloid__Treated_vs_Control = myeloid_result,
+    Lymphoid__Treated_vs_Control = lymphoid_result
+  ),
+  comparison_order = "Treated_vs_Control",
+  comparison_labels = c(
+    Treated_vs_Control = "Treated vs Control"
+  ),
+  gene_order = "mean_logFC",
+  fdr_cutoff = 0.05,
+  logfc_cutoff = 1,
+  label_top_up = 5,
+  label_top_down = 5,
+  cap_y = 25,
+  save = "outputs/signed_manhattan.pdf"
+)
+
+manhattan_result$plot
+manhattan_result$summary
+manhattan_result$labels
+```
+
+Gene positions can be shared across panels using mean log fold change,
+alphabetical gene label, or first input appearance, or ordered independently
+within each panel by log fold change. Significant and non-significant genes
+retain the same comparison colour but use different opacity and point size.
+Faceting and positive/negative position provide non-colour distinctions.
+Optional labels are selected separately within every sorting-by-comparison
+panel; manually requested genes are always eligible. Labels require ggrepel,
+while optional rasterized points use ggrastr when installed and otherwise fall
+back to ordinary ggplot2 points.
+
+The returned data retain uncapped signed scores, capped display scores, cutoff
+classes, gene keys, and a `Capped` indicator. This overview does not replace
+the effect sizes, uncertainty, study design, replication checks, or complete
+differential-expression tables required for interpretation.
+
 ### Reusable R palettes
 
 | Palette | Colours | Intended use |
 |---|---|---|
 | `BULK_PCA_MACARON_COLORS` | 15 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_pca()` and other bulk/pseudobulk visualizations. |
 | `BULK_QC_MACARON_COLORS` | 12 muted colours beginning with neutral grey | Default ordered groups in `plot_bulk_qc()`, especially when the first group is a reference or control. |
+| `SIGNED_MANHATTAN_MACARON_COLORS` | 12 muted comparison colours | Default comparison labels in `plot_signed_manhattan()`. |
 
 The palette is stored as an unnamed character vector so a plotting function
 can assign colours consistently after applying the requested group order. Pass
