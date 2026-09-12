@@ -600,6 +600,13 @@ be controlled explicitly, and point jitter is reproducible. Without
 genes form facet rows and split values form columns. The automatic height
 adapts to either layout.
 
+`violin_scale` controls how widths are normalized across groups: `"width"`
+gives each violin the same maximum width, `"area"` gives each the same total
+area, and `"count"` makes width proportional to sample count. The default
+`"width"` mode emphasizes distribution shape without encoding unequal group
+sizes; individual points and the returned summaries retain sample-count
+context.
+
 The returned list retains the plot, its complete long-format data, per-gene
 and per-panel descriptive statistics, resolved gene mapping, full normalized
 log2-CPM matrix, normalized edgeR object, and exact colour mapping. Metadata

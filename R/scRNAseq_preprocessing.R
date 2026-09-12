@@ -3532,6 +3532,10 @@ plot_bulk_qc <- function(
 #' @param violin_alpha Numeric scalar in `[0, 1]` controlling violin opacity.
 #' @param violin_linewidth Non-negative numeric scalar controlling violin
 #'   outline width.
+#' @param violin_scale One of `"width"`, `"area"`, or `"count"`, passed to
+#'   [ggplot2::geom_violin()]. `"width"` gives every violin the same maximum
+#'   width, `"area"` gives every violin the same total area, and `"count"`
+#'   scales width according to the number of observations.
 #' @param trim Logical scalar. Whether violin densities are trimmed to the
 #'   observed expression range.
 #' @param boxplot Logical scalar. Whether to overlay a white boxplot.
@@ -3614,6 +3618,7 @@ plot_bulk_violin <- function(
     violin_width = 0.85,
     violin_alpha = 0.65,
     violin_linewidth = 0.45,
+    violin_scale = c("width", "area", "count"),
     trim = FALSE,
     boxplot = TRUE,
     box_width = 0.16,
@@ -3633,6 +3638,7 @@ plot_bulk_violin <- function(
     save = NULL,
     verbose = TRUE
 ) {
+    violin_scale <- match.arg(violin_scale)
     required_packages <- c("edgeR", "ggplot2")
     missing_packages <- required_packages[!vapply(
         required_packages,
@@ -4016,7 +4022,8 @@ plot_bulk_violin <- function(
             width = violin_width,
             alpha = violin_alpha,
             trim = trim,
-            linewidth = violin_linewidth
+            linewidth = violin_linewidth,
+            scale = violin_scale
         )
     if (boxplot) {
         plot <- plot + ggplot2::geom_boxplot(
@@ -4153,6 +4160,7 @@ plot_bulk_violin <- function(
         if (!is.null(split_by)) {
             message("Split by: ", split_by)
         }
+        message("Violin scale: ", violin_scale)
         message("TMM normalization + log2 CPM")
         message("")
         message("Gene mapping:")

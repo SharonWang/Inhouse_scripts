@@ -68,6 +68,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Updated `plot_bulk_violin()` with a documented `violin_scale` option for
+  equal-width, equal-area, or sample-count-scaled violins, passed directly to
+  `ggplot2::geom_violin()` and reported in verbose output.
 - Reworked the supplied gene-set heatmap into the namespace-safe R pipeline
   style, removing its attached-pipe dependency and adding project, gene-set,
   count, metadata, aggregation, ordering, scaling, palette, clustering, and
@@ -127,6 +130,9 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the revised violin-scale interface, Roxygen guidance, plotting-layer
+  mapping, verbose output, README explanation, project log, and Git diff before
+  committing.
 - Reviewed the gene-set heatmap project alignment, normalization, gene mapping,
   duplicate-set handling, sample aggregation, metadata constancy, ordering,
   row scaling, colour breaks, annotations, clustering, export, return interface,
@@ -156,6 +162,8 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: add violin scaling modes` — Added configurable width, area, and
+  sample-count scaling to the existing bulk expression violin plot.
 - `feat: add gene-set expression heatmap` — Added the documented gene-program
   ComplexHeatmap utility, reusable purple palette, safeguards, and README
   guidance.
