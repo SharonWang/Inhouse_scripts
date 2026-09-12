@@ -75,6 +75,33 @@ BULK_QC_MACARON_COLORS <- c(
 )
 
 
+#' Macaron colour palette for bulk RNA-seq violin plots
+#'
+#' A reusable vector of 12 muted pastel colours supplied with
+#' [plot_bulk_violin()]. Colours are intentionally unnamed so the function can
+#' assign them after resolving the requested group order.
+#'
+#' @return A character vector containing 12 hexadecimal colour values.
+#'
+#' @examples
+#' BULK_VIOLIN_MACARON_COLORS
+#' BULK_VIOLIN_MACARON_COLORS[seq_len(3)]
+BULK_VIOLIN_MACARON_COLORS <- c(
+    "#E6A4A8", # pink
+    "#9DB7D5", # blue
+    "#A8C8A0", # green
+    "#E5C07B", # yellow
+    "#B8A1C8", # lavender
+    "#8FC7C3", # mint
+    "#D7A6C2", # raspberry
+    "#D8B4A0", # peach
+    "#A5C3D5", # sky
+    "#9FBDB0", # sage
+    "#C7B299", # caramel
+    "#C3B6D8"  # violet
+)
+
+
 #' Macaron comparison palette for signed Manhattan plots
 #'
 #' A reusable vector of 12 muted colours supplied with
@@ -3424,6 +3451,689 @@ plot_bulk_qc <- function(
         plot = combined,
         plots = plot_list,
         metadata = meta,
+        colors = colors
+    )
+}
+
+
+#' Plot normalized bulk RNA-seq expression distributions
+#'
+#' Calculate TMM-normalized log2 counts per million for selected genes and
+#' display their sample-level distributions as faceted violin plots. Optional
+#' boxplots and jittered sample points retain distribution summaries and
+#' individual biological-replicate context.
+#'
+#' @param dat A list-like featureCounts project containing `counts`, `metadata`,
+#'   and `genes`. Count-matrix columns must be identical to metadata row names,
+#'   and count-matrix rows must be identical to gene-annotation row names.
+#' @param genes Non-empty character vector of gene symbols or stable gene IDs.
+#'   Requested order is preserved. Missing genes produce warnings; when one
+#'   request matches multiple annotation rows, the row with the highest mean
+#'   log2 CPM is used.
+#' @param group_by Character scalar naming the metadata column displayed on the
+#'   x-axis and used for violin colours.
+#' @param split_by `NULL` or a character scalar naming a metadata column used
+#'   for facet columns. Genes form facet rows when this is supplied.
+#' @param subset Optional unquoted logical expression evaluated within
+#'   `dat$metadata`, with access to the calling environment. Missing results
+#'   are treated as `FALSE`.
+#' @param gene_col Character scalar naming the preferred gene-symbol column in
+#'   `dat$genes`. Stable IDs are used when this column is absent or blank.
+#' @param gene_id_col Character scalar naming the preferred stable-ID column in
+#'   `dat$genes`. Annotation row names are used when this column is absent.
+#' @param group_order `NULL` or a unique character vector defining x-axis group
+#'   order. Observed groups omitted from the vector are appended in first-seen
+#'   order; unobserved supplied values are dropped from the plotted levels.
+#' @param split_order `NULL` or a unique character vector defining split-panel
+#'   order. Observed values omitted from the vector are appended.
+#' @param colors `NULL` or a character colour vector. Unnamed colours are
+#'   assigned in plotted group order. Named colours must cover every observed
+#'   group. The default uses `BULK_VIOLIN_MACARON_COLORS` for up to 12 groups
+#'   and a pastel HCL palette for larger sets.
+#' @param prior_count Non-negative numeric scalar passed to [edgeR::cpm()] when
+#'   calculating log2 CPM values.
+#' @param violin_width Positive numeric scalar controlling violin width.
+#' @param violin_alpha Numeric scalar in `[0, 1]` controlling violin opacity.
+#' @param violin_linewidth Non-negative numeric scalar controlling violin
+#'   outline width.
+#' @param trim Logical scalar. Whether violin densities are trimmed to the
+#'   observed expression range.
+#' @param boxplot Logical scalar. Whether to overlay a white boxplot.
+#' @param box_width Positive numeric scalar controlling boxplot width.
+#' @param box_linewidth Non-negative numeric scalar controlling box outlines.
+#' @param show_points Logical scalar. Whether to overlay individual samples.
+#' @param point_size Positive numeric scalar controlling sample-point size.
+#' @param point_alpha Numeric scalar in `[0, 1]` controlling point opacity.
+#' @param jitter_width Non-negative numeric scalar controlling horizontal
+#'   jitter. A fixed seed makes point placement reproducible.
+#' @param facet_ncol `NULL` or a positive integer giving the number of gene
+#'   columns when `split_by` is `NULL`. The default uses at most four columns.
+#' @param free_y Logical scalar. Whether each facet row may use an independent
+#'   y-axis scale.
+#' @param italic_gene_title Logical scalar. Whether gene facet labels use
+#'   italic type.
+#' @param rotate_x Numeric scalar giving the x-axis label angle in degrees.
+#' @param y_title Character, expression, or other ggplot2-compatible y-axis
+#'   title. The default displays log2 CPM.
+#' @param title `NULL` or a character scalar used as the plot title.
+#' @param width Positive numeric scalar giving saved figure width in inches.
+#' @param height `NULL` or a positive numeric scalar giving saved figure height
+#'   in inches. When omitted, height is derived from the facet layout.
+#' @param save `NULL` or a character scalar giving an output figure path. PDF
+#'   files use `grDevices::cairo_pdf`; other formats are written at 300 dpi.
+#' @param verbose Logical scalar. Whether to print sample, gene, grouping, and
+#'   gene-resolution summaries.
+#'
+#' @return A named list containing:
+#'   \describe{
+#'     \item{plot}{The assembled `ggplot` object.}
+#'     \item{data}{Long-format plotting data with expression and sample
+#'       metadata. Metadata fields that collide with generated columns are
+#'       retained with a `metadata_` prefix.}
+#'     \item{summary}{Per-gene, per-group, and, when requested, per-split
+#'       sample count, mean, median, and standard deviation of log2 CPM.}
+#'     \item{gene_mapping}{Resolved requested gene, symbol, stable ID, and
+#'       original count-row mapping.}
+#'     \item{logCPM}{The complete selected-sample TMM-normalized log2-CPM
+#'       matrix before gene selection.}
+#'     \item{dge}{The normalized [edgeR::DGEList()] object.}
+#'     \item{colors}{The named group-colour mapping used by the plot.}
+#'   }
+#'
+#' @details
+#' This function expects raw sample-level bulk RNA-seq counts or
+#' replicate-aware pseudobulk counts. TMM normalization is recalculated after
+#' optional sample subsetting. The plot is descriptive and does not replace a
+#' design-aware differential-expression model, effect estimates, or biological
+#' replication checks. Required packages are `edgeR` and `ggplot2`.
+#'
+#' @examples
+#' \dontrun{
+#' violin_result <- plot_bulk_violin(
+#'     project,
+#'     genes = c("GATA1", "SPI1", "CEBPA"),
+#'     group_by = "Condition",
+#'     split_by = "Sorting",
+#'     group_order = c("Control", "Treated"),
+#'     save = "outputs/bulk_gene_expression.pdf"
+#' )
+#' violin_result$plot
+#' violin_result$summary
+#' violin_result$gene_mapping
+#' }
+#'
+#' @export
+plot_bulk_violin <- function(
+    dat,
+    genes,
+    group_by = "Sorting",
+    split_by = NULL,
+    subset = NULL,
+    gene_col = "gene_name",
+    gene_id_col = "gene_id",
+    group_order = NULL,
+    split_order = NULL,
+    colors = NULL,
+    prior_count = 2,
+    violin_width = 0.85,
+    violin_alpha = 0.65,
+    violin_linewidth = 0.45,
+    trim = FALSE,
+    boxplot = TRUE,
+    box_width = 0.16,
+    box_linewidth = 0.4,
+    show_points = TRUE,
+    point_size = 2.2,
+    point_alpha = 0.9,
+    jitter_width = 0.08,
+    facet_ncol = NULL,
+    free_y = FALSE,
+    italic_gene_title = TRUE,
+    rotate_x = 45,
+    y_title = expression(log[2] ~ CPM),
+    title = NULL,
+    width = 7,
+    height = NULL,
+    save = NULL,
+    verbose = TRUE
+) {
+    required_packages <- c("edgeR", "ggplot2")
+    missing_packages <- required_packages[!vapply(
+        required_packages,
+        requireNamespace,
+        logical(1),
+        quietly = TRUE
+    )]
+    if (length(missing_packages) > 0L) {
+        stop(
+            "Please install required package(s): ",
+            paste(missing_packages, collapse = ", "),
+            call. = FALSE
+        )
+    }
+
+    required_objects <- c("counts", "metadata", "genes")
+    if (!is.list(dat)) {
+        stop("`dat` must be a list-like featureCounts project.", call. = FALSE)
+    }
+    missing_objects <- setdiff(required_objects, names(dat))
+    if (length(missing_objects) > 0L) {
+        stop(
+            "`dat` is missing: ", paste(missing_objects, collapse = ", "),
+            call. = FALSE
+        )
+    }
+
+    counts <- dat$counts
+    meta <- dat$metadata
+    anno <- dat$genes
+    if ((!is.matrix(counts) && !inherits(counts, "Matrix")) ||
+        !is.numeric(counts)) {
+        stop("`dat$counts` must be a numeric matrix-like object.", call. = FALSE)
+    }
+    if (!is.data.frame(meta) || !is.data.frame(anno)) {
+        stop("`dat$metadata` and `dat$genes` must be data frames.", call. = FALSE)
+    }
+    if (is.null(colnames(counts)) || is.null(rownames(counts)) ||
+        is.null(rownames(meta)) || is.null(rownames(anno))) {
+        stop("Counts, metadata, and gene annotations require row/column names.",
+             call. = FALSE)
+    }
+    if (anyDuplicated(colnames(counts)) || anyDuplicated(rownames(counts)) ||
+        anyDuplicated(rownames(meta)) || anyDuplicated(rownames(anno))) {
+        stop("Sample and gene row identifiers must be unique.", call. = FALSE)
+    }
+    if (!identical(colnames(counts), rownames(meta))) {
+        stop(
+            "colnames(dat$counts) and rownames(dat$metadata) must be identical ",
+            "and in the same order.", call. = FALSE
+        )
+    }
+    if (!identical(rownames(counts), rownames(anno))) {
+        stop(
+            "rownames(dat$counts) and rownames(dat$genes) must be identical ",
+            "and in the same order.", call. = FALSE
+        )
+    }
+    if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
+        stop("`dat$counts` must contain finite, non-negative values.",
+             call. = FALSE)
+    }
+
+    scalar_text <- function(x) {
+        is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+    }
+    if (!scalar_text(group_by) ||
+        (!is.null(split_by) && !scalar_text(split_by)) ||
+        !scalar_text(gene_col) || !scalar_text(gene_id_col)) {
+        stop("Grouping and annotation column names must be non-empty strings.",
+             call. = FALSE)
+    }
+    reserved_columns <- c(".SampleID", "Gene", "GeneName", "GeneID", "Expression")
+    if (group_by %in% reserved_columns ||
+        (!is.null(split_by) && split_by %in% reserved_columns)) {
+        stop("`group_by` and `split_by` cannot use generated output names.",
+             call. = FALSE)
+    }
+    if (!group_by %in% colnames(meta)) {
+        stop("`group_by = \"", group_by, "\"` was not found in dat$metadata.",
+             call. = FALSE)
+    }
+    if (!is.null(split_by) && !split_by %in% colnames(meta)) {
+        stop("`split_by = \"", split_by, "\"` was not found in dat$metadata.",
+             call. = FALSE)
+    }
+    if (!is.null(split_by) && identical(group_by, split_by)) {
+        stop("`split_by` must differ from `group_by`.", call. = FALSE)
+    }
+
+    logical_arguments <- list(
+        trim = trim,
+        boxplot = boxplot,
+        show_points = show_points,
+        free_y = free_y,
+        italic_gene_title = italic_gene_title,
+        verbose = verbose
+    )
+    invalid_logical <- names(logical_arguments)[!vapply(
+        logical_arguments,
+        function(x) is.logical(x) && length(x) == 1L && !is.na(x),
+        logical(1)
+    )]
+    if (length(invalid_logical) > 0L) {
+        stop(
+            "These arguments must be single TRUE/FALSE values: ",
+            paste(invalid_logical, collapse = ", "), call. = FALSE
+        )
+    }
+
+    numeric_arguments <- list(
+        prior_count = prior_count,
+        violin_width = violin_width,
+        violin_alpha = violin_alpha,
+        violin_linewidth = violin_linewidth,
+        box_width = box_width,
+        box_linewidth = box_linewidth,
+        point_size = point_size,
+        point_alpha = point_alpha,
+        jitter_width = jitter_width,
+        width = width,
+        rotate_x = rotate_x
+    )
+    invalid_numeric <- names(numeric_arguments)[!vapply(
+        numeric_arguments,
+        function(x) is.numeric(x) && length(x) == 1L &&
+            !is.na(x) && is.finite(x),
+        logical(1)
+    )]
+    if (length(invalid_numeric) > 0L) {
+        stop(
+            "These arguments must be finite numeric scalars: ",
+            paste(invalid_numeric, collapse = ", "), call. = FALSE
+        )
+    }
+    if (prior_count < 0 || violin_width <= 0 || violin_linewidth < 0 ||
+        box_width <= 0 || box_linewidth < 0 || point_size <= 0 ||
+        jitter_width < 0 || width <= 0 ||
+        violin_alpha < 0 || violin_alpha > 1 ||
+        point_alpha < 0 || point_alpha > 1) {
+        stop("Plot dimensions, widths, sizes, and alpha values are out of range.",
+             call. = FALSE)
+    }
+    if (!is.null(height) && (!is.numeric(height) || length(height) != 1L ||
+        is.na(height) || !is.finite(height) || height <= 0)) {
+        stop("`height` must be NULL or a positive numeric scalar.", call. = FALSE)
+    }
+    if (!is.null(facet_ncol) && (!is.numeric(facet_ncol) ||
+        length(facet_ncol) != 1L || is.na(facet_ncol) ||
+        facet_ncol < 1 || facet_ncol != as.integer(facet_ncol))) {
+        stop("`facet_ncol` must be NULL or a positive integer.", call. = FALSE)
+    }
+    if (!is.null(save) && !scalar_text(save)) {
+        stop("`save` must be NULL or a non-empty file path.", call. = FALSE)
+    }
+
+    genes <- unique(as.character(genes))
+    genes <- genes[!is.na(genes) & nzchar(genes)]
+    if (length(genes) == 0L) {
+        stop("`genes` must contain at least one non-empty gene label or ID.",
+             call. = FALSE)
+    }
+    for (order_name in c("group_order", "split_order")) {
+        order_value <- get(order_name)
+        if (!is.null(order_value) &&
+            (!is.character(order_value) || anyNA(order_value) ||
+             any(!nzchar(order_value)) || anyDuplicated(order_value))) {
+            stop("`", order_name, "` must be NULL or unique non-empty strings.",
+                 call. = FALSE)
+        }
+    }
+
+    subset_expr <- substitute(subset)
+    if (!identical(subset_expr, quote(NULL))) {
+        keep_samples <- eval(subset_expr, envir = meta, enclos = parent.frame())
+        if (!is.logical(keep_samples) || length(keep_samples) != nrow(meta)) {
+            stop(
+                "`subset` must evaluate to one TRUE/FALSE value for every ",
+                "metadata row.", call. = FALSE
+            )
+        }
+        keep_samples[is.na(keep_samples)] <- FALSE
+        if (!any(keep_samples)) {
+            stop("`subset` retained zero samples.", call. = FALSE)
+        }
+        meta <- meta[keep_samples, , drop = FALSE]
+        counts <- counts[, rownames(meta), drop = FALSE]
+    }
+
+    group_values <- as.character(meta[[group_by]])
+    if (anyNA(group_values) || any(!nzchar(group_values))) {
+        stop("The selected `group_by` column contains missing or empty values.",
+             call. = FALSE)
+    }
+    if (!is.null(split_by)) {
+        split_values <- as.character(meta[[split_by]])
+        if (anyNA(split_values) || any(!nzchar(split_values))) {
+            stop("The selected `split_by` column contains missing or empty values.",
+                 call. = FALSE)
+        }
+    }
+
+    library_sizes <- colSums(counts)
+    if (any(!is.finite(library_sizes)) || any(library_sizes <= 0)) {
+        stop("At least one selected sample has library size <= 0.", call. = FALSE)
+    }
+
+    dge <- edgeR::DGEList(counts = counts)
+    dge <- edgeR::calcNormFactors(dge, method = "TMM")
+    logcpm <- edgeR::cpm(
+        dge,
+        log = TRUE,
+        prior.count = prior_count,
+        normalized.lib.sizes = TRUE
+    )
+
+    anno$.GeneID_internal <- if (gene_id_col %in% colnames(anno)) {
+        as.character(anno[[gene_id_col]])
+    } else {
+        rownames(anno)
+    }
+    bad_gene_ids <- is.na(anno$.GeneID_internal) |
+        !nzchar(anno$.GeneID_internal)
+    anno$.GeneID_internal[bad_gene_ids] <- rownames(anno)[bad_gene_ids]
+    anno$.GeneName_internal <- if (gene_col %in% colnames(anno)) {
+        as.character(anno[[gene_col]])
+    } else {
+        anno$.GeneID_internal
+    }
+    bad_gene_names <- is.na(anno$.GeneName_internal) |
+        !nzchar(anno$.GeneName_internal)
+    anno$.GeneName_internal[bad_gene_names] <-
+        anno$.GeneID_internal[bad_gene_names]
+
+    selected_rows <- list()
+    gene_match_rows <- list()
+    for (gene in genes) {
+        candidates <- unique(c(
+            which(anno$.GeneName_internal == gene),
+            which(anno$.GeneID_internal == gene)
+        ))
+        if (length(candidates) == 0L) {
+            warning("Gene not found: ", gene, call. = FALSE)
+            next
+        }
+        if (length(candidates) > 1L) {
+            mean_expression <- rowMeans(
+                logcpm[candidates, , drop = FALSE], na.rm = TRUE
+            )
+            chosen <- candidates[which.max(mean_expression)]
+            if (verbose) {
+                message(
+                    "Gene '", gene, "' matched ", length(candidates),
+                    " rows; using ", anno$.GeneID_internal[chosen],
+                    " (highest mean logCPM)."
+                )
+            }
+            candidates <- chosen
+        }
+        selected_rows[[gene]] <- candidates
+        gene_match_rows[[gene]] <- data.frame(
+            RequestedGene = gene,
+            GeneName = anno$.GeneName_internal[candidates],
+            GeneID = anno$.GeneID_internal[candidates],
+            CountRow = rownames(anno)[candidates],
+            stringsAsFactors = FALSE
+        )
+    }
+    if (length(selected_rows) == 0L) {
+        stop("None of the requested genes were found.", call. = FALSE)
+    }
+    gene_mapping <- do.call(rbind, gene_match_rows)
+    rownames(gene_mapping) <- NULL
+
+    expression_rows <- lapply(names(selected_rows), function(gene) {
+        index <- selected_rows[[gene]]
+        data.frame(
+            .SampleID = colnames(logcpm),
+            Gene = gene,
+            GeneName = anno$.GeneName_internal[index],
+            GeneID = anno$.GeneID_internal[index],
+            Expression = as.numeric(logcpm[index, , drop = TRUE]),
+            stringsAsFactors = FALSE
+        )
+    })
+    expression_data <- do.call(rbind, expression_rows)
+    rownames(expression_data) <- NULL
+
+    metadata_copy <- meta
+    metadata_copy$.SampleID <- NULL
+    collisions <- intersect(colnames(metadata_copy), colnames(expression_data))
+    if (length(collisions) > 0L) {
+        replacement_names <- paste0("metadata_", collisions)
+        while (any(replacement_names %in% colnames(metadata_copy))) {
+            replacement_names <- paste0("metadata_", replacement_names)
+        }
+        colnames(metadata_copy)[match(collisions, colnames(metadata_copy))] <-
+            replacement_names
+    }
+    metadata_index <- match(expression_data$.SampleID, rownames(metadata_copy))
+    if (anyNA(metadata_index)) {
+        stop(
+            "Metadata join failed for at least one sample. Check project order.",
+            call. = FALSE
+        )
+    }
+    expression_data <- cbind(
+        expression_data,
+        metadata_copy[metadata_index, , drop = FALSE]
+    )
+    rownames(expression_data) <- NULL
+
+    observed_groups <- unique(as.character(expression_data[[group_by]]))
+    if (is.null(group_order)) {
+        group_order <- observed_groups
+    } else {
+        group_order <- c(group_order, setdiff(observed_groups, group_order))
+    }
+    group_order <- group_order[group_order %in% observed_groups]
+    expression_data[[group_by]] <- factor(
+        as.character(expression_data[[group_by]]), levels = group_order
+    )
+
+    if (!is.null(split_by)) {
+        observed_splits <- unique(as.character(expression_data[[split_by]]))
+        if (is.null(split_order)) {
+            split_order <- observed_splits
+        } else {
+            split_order <- c(split_order, setdiff(observed_splits, split_order))
+        }
+        split_order <- split_order[split_order %in% observed_splits]
+        expression_data[[split_by]] <- factor(
+            as.character(expression_data[[split_by]]), levels = split_order
+        )
+    }
+
+    genes_found <- names(selected_rows)
+    expression_data$Gene <- factor(expression_data$Gene, levels = genes_found)
+    group_levels <- levels(droplevels(expression_data[[group_by]]))
+    if (is.null(colors)) {
+        colors <- if (length(group_levels) <=
+            length(BULK_VIOLIN_MACARON_COLORS)) {
+            BULK_VIOLIN_MACARON_COLORS[seq_along(group_levels)]
+        } else {
+            grDevices::hcl.colors(length(group_levels), palette = "Pastel 1")
+        }
+        names(colors) <- group_levels
+    } else {
+        if (!is.character(colors) || anyNA(colors) || any(!nzchar(colors))) {
+            stop("`colors` must contain valid non-missing colour strings.",
+                 call. = FALSE)
+        }
+        if (is.null(names(colors))) {
+            if (length(colors) < length(group_levels)) {
+                stop("Not enough colors supplied.", call. = FALSE)
+            }
+            colors <- colors[seq_along(group_levels)]
+            names(colors) <- group_levels
+        } else {
+            missing_colors <- setdiff(group_levels, names(colors))
+            if (length(missing_colors) > 0L) {
+                stop(
+                    "Missing colors for group(s): ",
+                    paste(missing_colors, collapse = ", "), call. = FALSE
+                )
+            }
+            colors <- colors[group_levels]
+        }
+    }
+
+    plot <- ggplot2::ggplot(
+        expression_data,
+        ggplot2::aes(
+            x = .data[[group_by]],
+            y = Expression,
+            fill = .data[[group_by]],
+            colour = .data[[group_by]]
+        )
+    ) +
+        ggplot2::geom_violin(
+            width = violin_width,
+            alpha = violin_alpha,
+            trim = trim,
+            linewidth = violin_linewidth
+        )
+    if (boxplot) {
+        plot <- plot + ggplot2::geom_boxplot(
+            width = box_width,
+            outlier.shape = NA,
+            fill = "white",
+            colour = "black",
+            linewidth = box_linewidth
+        )
+    }
+    if (show_points) {
+        plot <- plot + ggplot2::geom_point(
+            position = ggplot2::position_jitter(
+                width = jitter_width, height = 0, seed = 123
+            ),
+            size = point_size,
+            alpha = point_alpha,
+            stroke = 0.3
+        )
+    }
+
+    scale_setting <- if (free_y) "free_y" else "fixed"
+    n_genes <- length(genes_found)
+    if (is.null(split_by)) {
+        facet_columns <- if (is.null(facet_ncol)) {
+            min(n_genes, 4L)
+        } else {
+            as.integer(facet_ncol)
+        }
+        plot <- plot + ggplot2::facet_wrap(
+            ~Gene, ncol = facet_columns, scales = scale_setting
+        )
+    } else {
+        split_formula <- stats::reformulate(split_by, response = "Gene")
+        plot <- plot + ggplot2::facet_grid(
+            split_formula, scales = scale_setting
+        )
+    }
+
+    gene_face_x <- if (is.null(split_by) && italic_gene_title) "italic" else "bold"
+    gene_face_y <- if (!is.null(split_by) && italic_gene_title) "italic" else "bold"
+    plot <- plot +
+        ggplot2::scale_fill_manual(values = colors, drop = FALSE) +
+        ggplot2::scale_colour_manual(values = colors, drop = FALSE) +
+        ggplot2::labs(
+            x = NULL, y = y_title, fill = group_by,
+            colour = group_by, title = title
+        ) +
+        ggplot2::theme_classic(base_size = 10) +
+        ggplot2::theme(
+            panel.grid = ggplot2::element_blank(),
+            axis.line = ggplot2::element_line(colour = "black", linewidth = 0.5),
+            axis.ticks = ggplot2::element_line(colour = "black", linewidth = 0.4),
+            axis.ticks.length = grid::unit(1.5, "mm"),
+            axis.text = ggplot2::element_text(colour = "black", size = 8.5),
+            axis.text.x = ggplot2::element_text(
+                angle = rotate_x,
+                hjust = if (rotate_x == 0) 0.5 else 1,
+                vjust = if (rotate_x == 0) 0.5 else 1
+            ),
+            axis.title = ggplot2::element_text(colour = "black", size = 9.5),
+            strip.background = ggplot2::element_blank(),
+            strip.text.y = ggplot2::element_text(
+                colour = "black", face = gene_face_y, size = 9
+            ),
+            strip.text.x = ggplot2::element_text(
+                colour = "black", face = gene_face_x, size = 9.5
+            ),
+            plot.title = ggplot2::element_text(
+                colour = "black", face = "bold", size = 10.5, hjust = 0.5
+            ),
+            legend.position = "none",
+            plot.margin = ggplot2::margin(5.5, 5.5, 5.5, 5.5)
+        )
+
+    if (is.null(height)) {
+        height <- if (is.null(split_by)) {
+            max(3.5, ceiling(n_genes / facet_columns) * 3)
+        } else {
+            max(3.5, n_genes * 2.5)
+        }
+    }
+    if (!is.null(save)) {
+        save_arguments <- list(
+            filename = save,
+            plot = plot,
+            width = width,
+            height = height,
+            units = "in"
+        )
+        if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
+            save_arguments$device <- grDevices::cairo_pdf
+        } else {
+            save_arguments$dpi <- 300
+        }
+        do.call(ggplot2::ggsave, save_arguments)
+    }
+
+    summary_fields <- c("Gene", group_by)
+    if (!is.null(split_by)) {
+        summary_fields <- c(summary_fields, split_by)
+    }
+    summary_indices <- split(
+        seq_len(nrow(expression_data)),
+        do.call(
+            interaction,
+            c(expression_data[summary_fields], list(drop = TRUE, lex.order = TRUE))
+        )
+    )
+    summary_data <- do.call(rbind, lapply(summary_indices, function(index) {
+        group_values <- expression_data[index[1], summary_fields, drop = FALSE]
+        values <- expression_data$Expression[index]
+        cbind(
+            group_values,
+            data.frame(
+                n = length(values),
+                mean = mean(values, na.rm = TRUE),
+                median = stats::median(values, na.rm = TRUE),
+                sd = stats::sd(values, na.rm = TRUE),
+                row.names = NULL
+            )
+        )
+    }))
+    rownames(summary_data) <- NULL
+
+    if (verbose) {
+        message("")
+        message("========================================")
+        message(" Bulk RNA-seq violin plot")
+        message("========================================")
+        message("Samples:  ", length(unique(expression_data$.SampleID)))
+        message("Genes:    ", paste(genes_found, collapse = ", "))
+        message("Group by: ", group_by)
+        if (!is.null(split_by)) {
+            message("Split by: ", split_by)
+        }
+        message("TMM normalization + log2 CPM")
+        message("")
+        message("Gene mapping:")
+        print(gene_mapping)
+        message("")
+        message("Group counts:")
+        print(table(expression_data[[group_by]]))
+        message("========================================")
+    }
+
+    list(
+        plot = plot,
+        data = expression_data,
+        summary = summary_data,
+        gene_mapping = gene_mapping,
+        logCPM = logcpm,
+        dge = dge,
         colors = colors
     )
 }

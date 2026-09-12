@@ -8,6 +8,14 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `plot_bulk_violin()` to the R bulk/pseudobulk visualization section
+  for TMM-normalized log2-CPM distributions of requested genes, with optional
+  metadata subsetting, split facets, boxplots, and reproducible sample points.
+- Added `BULK_VIOLIN_MACARON_COLORS` as the reusable 12-colour palette supplied
+  with the violin plot.
+- Documented every violin-plot input and returned object, gene resolution,
+  normalization, facet layout, figure export behavior, dependencies, and
+  scientific scope.
 - Added `collect_edgeR_pairwise()` and its internal shared collector to combine
   named edgeR analyses with explicit reference, comparison, sorting, original
   gene-row, and signed-significance fields.
@@ -43,6 +51,10 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Reworked the supplied violin function into the existing namespace-safe R
+  pipeline style, with project and count validation, collision-safe metadata,
+  explicit factor and palette handling, split-aware summaries, and no reliance
+  on an attached pipe operator.
 - Updated `plot_signed_manhattan()` with case-insensitive alphabetical ordering
   as the default, revised point and export dimensions, and FDR-first label
   ranking with directional log-fold-change tie breaking.
@@ -85,6 +97,9 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the bulk violin normalization flow, gene matching, metadata joins,
+  ordering, facets, plot layers, summaries, return interface, reusable palette,
+  Roxygen comments, README, and Git diff before committing.
 - Reviewed the revised signed-Manhattan defaults, label ranking and identity,
   capped-point layers, facet-aware label placement, plot expansion, summary
   fields, return interface, Roxygen documentation, README, and Git diff before
@@ -103,6 +118,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: add bulk RNA-seq violin plotter` — Added the documented expression
+  distribution utility, reusable palette, validation safeguards, and README
+  guidance.
 - `feat: refine signed Manhattan labels and capping` — Updated the existing
   function with stable FDR-ranked labels, capped-point indicators, expanded
   plotting space, additional summaries, revised defaults, and documentation.

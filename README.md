@@ -294,6 +294,7 @@ functions supplied in R.
 | Differential-expression collection | `collect_edgeR_pairwise()` | Combines named edgeR pairwise results with analysis, sorting, contrast, provenance, and signed-significance fields. | One row-bound data frame retaining all result and annotation columns. |
 | Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
 | Bulk/pseudobulk quality-control visualization | `plot_bulk_qc()` | Calculates count-matrix library sizes and plots selected sample-level read, assignment, and library metrics in faceted panels. | Combined patchwork figure, individual metric plots, plotting metadata, and colour mapping. |
+| Bulk/pseudobulk expression visualization | `plot_bulk_violin()` | Calculates TMM-normalized log2 CPM and plots selected gene distributions with optional boxplots, sample points, and split facets. | Plot, long-format expression data, per-panel summaries, gene mapping, log2 CPM, DGEList, and colours. |
 | Differential-expression visualization | `plot_signed_manhattan()` | Displays signed adjusted-p-value significance for every tested gene across comparisons and sorting groups. | Plot, complete plotting data, selected labels, per-panel summary, colours, and cutoff metadata. |
 
 ### `read_featurecounts_project(...)`
@@ -566,6 +567,47 @@ named colour mapping. It does not modify the input project or apply QC
 exclusion thresholds. Required packages are ggplot2, patchwork, and scales;
 PDF output uses Cairo and other figure formats are saved at 300 dpi.
 
+### `plot_bulk_violin(...)`
+
+Displays TMM-normalized log2-CPM distributions for requested genes across
+sample groups. Gene symbols and stable IDs are both accepted. If a requested
+symbol resolves to multiple annotation rows, the row with the highest mean
+expression is selected and recorded explicitly.
+
+```r
+violin_result <- plot_bulk_violin(
+  project,
+  genes = c("GATA1", "SPI1", "CEBPA"),
+  group_by = "Condition",
+  split_by = "Sorting",
+  group_order = c("Control", "Treated"),
+  boxplot = TRUE,
+  show_points = TRUE,
+  save = "outputs/bulk_gene_expression.pdf"
+)
+
+violin_result$plot
+violin_result$summary
+violin_result$gene_mapping
+```
+
+The optional `subset` expression is evaluated against sample metadata before
+normalization. Requested gene order is preserved, group and split orders can
+be controlled explicitly, and point jitter is reproducible. Without
+`split_by`, genes use a wrap layout of at most four columns; with `split_by`,
+genes form facet rows and split values form columns. The automatic height
+adapts to either layout.
+
+The returned list retains the plot, its complete long-format data, per-gene
+and per-panel descriptive statistics, resolved gene mapping, full normalized
+log2-CPM matrix, normalized edgeR object, and exact colour mapping. Metadata
+columns that conflict with generated plotting fields are preserved with a
+`metadata_` prefix. The function requires edgeR and ggplot2.
+
+This is a descriptive replicate-level view for raw bulk or replicate-aware
+pseudobulk counts. It does not replace study-design-aware differential
+expression, effect-size estimation, or biological replication checks.
+
 ### `plot_signed_manhattan(...)`
 
 Creates a signed Manhattan-style overview of complete pairwise DE tables.
@@ -627,6 +669,7 @@ required for interpretation.
 |---|---|---|
 | `BULK_PCA_MACARON_COLORS` | 15 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_pca()` and other bulk/pseudobulk visualizations. |
 | `BULK_QC_MACARON_COLORS` | 12 muted colours beginning with neutral grey | Default ordered groups in `plot_bulk_qc()`, especially when the first group is a reference or control. |
+| `BULK_VIOLIN_MACARON_COLORS` | 12 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_violin()`. |
 | `SIGNED_MANHATTAN_MACARON_COLORS` | 12 muted comparison colours | Default comparison labels in `plot_signed_manhattan()`. |
 
 The palette is stored as an unnamed character vector so a plotting function
