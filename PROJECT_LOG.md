@@ -8,6 +8,12 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `plot_bulk_qc()` to the R visualization section for faceted
+  sample-level read, assignment, and count-matrix library-size QC panels.
+- Added the reusable 12-colour `BULK_QC_MACARON_COLORS` R palette, preserving
+  the supplied neutral-grey-first ordering for reference or control groups.
+- Documented every QC plotting parameter, returned object, dependency, figure
+  export behavior, and the interpretation of optional connecting lines.
 - Added `plot_bulk_pca()` to the R visualization section for validated
   sample-level PCA of bulk or replicate-aware pseudobulk featureCounts
   projects.
@@ -28,6 +34,11 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Recalculated `LibrarySize` from the aligned count matrix on every QC call and
+  removed unused dplyr and tidyr requirements from the supplied function.
+- Added project-alignment, count-integrity, metric-type, finite-value,
+  sample-identifier, categorical-group, factor-order, palette, layout, and
+  numeric-range safeguards to the bulk QC plotting workflow.
 - Added count-integrity, metadata-order, subset, factor-order, palette, shape,
   numeric-range, component-availability, and non-zero-variance safeguards to
   the supplied PCA workflow.
@@ -49,6 +60,9 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the bulk QC data flow, requested metrics, faceting and line grouping,
+  reusable palette, Roxygen interface, README example, and Git diff before
+  committing.
 - Reviewed the PCA workflow, plot-layer ordering, reusable palette, complete
   Roxygen interface, README example, and Git diff before committing.
 - Reviewed the shared design preparation, contrast direction, edgeR and
@@ -57,6 +71,8 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: add bulk RNA-seq QC plotter` — Added the documented faceted QC
+  utility, reusable grey-first macaron palette, safeguards, and README guide.
 - `feat: add bulk RNA-seq PCA plotter` — Added the documented PCA utility,
   reusable macaron palette, validation safeguards, and README guidance.
 - `feat: add pairwise edgeR and limma-voom workflows` — Added shared design

@@ -47,6 +47,34 @@ BULK_PCA_MACARON_COLORS <- c(
 )
 
 
+#' Macaron colour palette for bulk RNA-seq QC plots
+#'
+#' A reusable vector of 12 muted colours supplied with [plot_bulk_qc()]. The
+#' leading neutral grey is useful for reference or control groups. Colours are
+#' intentionally unnamed so functions can assign them in a requested group
+#' order.
+#'
+#' @return A character vector containing 12 hexadecimal colour values.
+#'
+#' @examples
+#' BULK_QC_MACARON_COLORS
+#' BULK_QC_MACARON_COLORS[seq_len(3)]
+BULK_QC_MACARON_COLORS <- c(
+    "#BDBDBD", # grey
+    "#9DB7D5", # blueberry
+    "#A8C8A0", # pistachio
+    "#E6A4A8", # strawberry
+    "#E5C07B", # vanilla
+    "#B8A1C8", # lavender
+    "#8FC7C3", # mint
+    "#D7A6C2", # raspberry
+    "#C7B299", # caramel
+    "#A5C3D5", # sky
+    "#D8B4A0", # peach
+    "#9FBDB0"  # sage
+)
+
+
 # =============================================================================
 # Data loading and import
 # =============================================================================
@@ -2655,5 +2683,516 @@ plot_bulk_pca <- function(
         keep_genes = keep_genes,
         colors = colors,
         shapes = if (!is.null(shape_by)) shapes else NULL
+    )
+}
+
+
+#' Plot sample-level quality metrics for a bulk RNA-seq project
+#'
+#' Calculate count-matrix library sizes, validate requested sample-level QC
+#' metrics, and create one faceted point plot per metric. Plots are combined
+#' with a shared colour legend and can optionally include within-facet group
+#' lines, sample labels, custom group ordering, custom colours, and figure
+#' export.
+#'
+#' @param dat A `featurecounts_project`-like named list containing `counts`, a
+#'   numeric gene-by-sample count matrix, and `metadata`, a data frame whose row
+#'   names are identical to the count-matrix column names and order.
+#' @param metrics Non-empty character vector naming numeric metadata columns to
+#'   plot. `"LibrarySize"` is calculated from `colSums(dat$counts)` and replaces
+#'   any existing metadata column with that name. Duplicate metric names are
+#'   plotted once, in order of first appearance.
+#' @param color_by Character scalar naming a categorical metadata column used
+#'   to colour points and optional connecting lines.
+#' @param facet_by Character scalar naming a categorical metadata column used
+#'   to create sample panels within every metric plot.
+#' @param sample_col Character scalar naming the sample-label metadata column.
+#'   If absent, it is created from metadata row names. Values must be unique and
+#'   non-missing. The reserved name `"LibrarySize"` is not supported here.
+#' @param color_order `NULL` or a unique character vector giving the desired
+#'   colour-group order. Every observed group must be included.
+#' @param colors `NULL` or a character vector of colours. An unnamed vector is
+#'   assigned in `color_order`; a named vector must contain every observed
+#'   colour group. By default, `BULK_QC_MACARON_COLORS` is used for up to 12
+#'   groups and `grDevices::hcl.colors(..., palette = "Pastel 1")` thereafter.
+#' @param point_size Positive numeric scalar controlling point size.
+#' @param point_alpha Numeric scalar between zero and one controlling point
+#'   transparency.
+#' @param label_samples Logical scalar. Whether to label points using
+#'   `ggrepel`; this option requires the `ggrepel` package.
+#' @param label_size Positive numeric scalar controlling sample-label text size.
+#' @param connect_samples Logical scalar. Whether to connect samples belonging
+#'   to the same colour group within each facet, following the displayed sample
+#'   order. Use only when that ordering has a meaningful interpretation.
+#' @param ncol Positive integer giving the number of columns in the combined
+#'   patchwork layout.
+#' @param width,height Positive numeric scalars giving saved figure dimensions
+#'   in inches.
+#' @param save `NULL` or a character scalar giving an output figure path. PDF
+#'   files use `grDevices::cairo_pdf`; other formats are written at 300 dpi.
+#' @param verbose Logical scalar. Whether to print the sample count and the
+#'   observed assignment-rate range when available.
+#'
+#' @return A named list with the following elements:
+#'   \describe{
+#'     \item{plot}{The combined `patchwork` figure.}
+#'     \item{plots}{A named list of individual `ggplot` objects, one per unique
+#'       requested metric.}
+#'     \item{metadata}{A sorted copy of the aligned metadata containing the
+#'       calculated `LibrarySize` column and plotting factor levels.}
+#'     \item{colors}{The named colour vector used in every panel.}
+#'   }
+#'
+#' @details
+#' This function summarizes available featureCounts and count-matrix QC fields;
+#' it does not alter `dat` or apply exclusion thresholds. Missing metric values
+#' are permitted, but each requested metric must contain at least one finite
+#' value. If `save` is supplied, the combined figure is written as a side
+#' effect. Required packages are `ggplot2`, `patchwork`, and `scales`, with
+#' `ggrepel` additionally required for labels.
+#'
+#' @examples
+#' \dontrun{
+#' qc_result <- plot_bulk_qc(
+#'     project,
+#'     color_by = "Condition",
+#'     facet_by = "Sorting",
+#'     color_order = c("Control", "Treated"),
+#'     label_samples = TRUE,
+#'     save = "outputs/bulk_sample_qc.pdf"
+#' )
+#' qc_result$plot
+#' qc_result$metadata
+#' }
+#'
+#' @export
+plot_bulk_qc <- function(
+    dat,
+    metrics = c(
+        "Total_input_reads",
+        "Assigned_reads",
+        "LibrarySize",
+        "Assignment_percent"
+    ),
+    color_by = "Condition",
+    facet_by = "Sorting",
+    sample_col = "SampleName",
+    color_order = NULL,
+    colors = NULL,
+    point_size = 3.0,
+    point_alpha = 0.9,
+    label_samples = FALSE,
+    label_size = 2.5,
+    connect_samples = FALSE,
+    ncol = 2,
+    width = 10,
+    height = 7,
+    save = NULL,
+    verbose = TRUE
+) {
+    required_packages <- c("ggplot2", "patchwork", "scales")
+    missing_packages <- required_packages[
+        !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+    ]
+    if (length(missing_packages) > 0L) {
+        stop(
+            "Required package(s) not installed: ",
+            paste(missing_packages, collapse = ", ")
+        )
+    }
+    if (isTRUE(label_samples) &&
+        !requireNamespace("ggrepel", quietly = TRUE)) {
+        stop("Package 'ggrepel' is required when label_samples = TRUE.")
+    }
+
+    required_elements <- c("counts", "metadata")
+    missing_elements <- setdiff(required_elements, names(dat))
+    if (length(missing_elements) > 0L) {
+        stop("dat is missing: ", paste(missing_elements, collapse = ", "))
+    }
+    counts <- dat$counts
+    meta <- dat$metadata
+    if (!is.matrix(counts) || !is.numeric(counts)) {
+        stop("dat$counts must be a numeric matrix.")
+    }
+    if (!is.data.frame(meta)) {
+        stop("dat$metadata must be a data frame.")
+    }
+    if (is.null(colnames(counts)) || anyNA(colnames(counts)) ||
+        any(!nzchar(colnames(counts))) || anyDuplicated(colnames(counts))) {
+        stop("dat$counts must have unique, non-empty sample column names.")
+    }
+    if (!identical(colnames(counts), rownames(meta))) {
+        stop(
+            "dat$counts columns and dat$metadata rows are not in identical ",
+            "sample order."
+        )
+    }
+    if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
+        stop("dat$counts must contain finite, non-negative values without NA.")
+    }
+    if (base::ncol(counts) == 0L) {
+        stop("dat must contain at least one sample.")
+    }
+
+    scalar_character <- function(x) {
+        is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+    }
+    scalar_logical <- function(x) {
+        is.logical(x) && length(x) == 1L && !is.na(x)
+    }
+    if (!is.character(metrics) || length(metrics) == 0L || anyNA(metrics) ||
+        any(!nzchar(metrics))) {
+        stop("metrics must be a non-empty character vector without missing values.")
+    }
+    metrics <- unique(metrics)
+    column_arguments <- list(
+        color_by = color_by,
+        facet_by = facet_by,
+        sample_col = sample_col
+    )
+    invalid_columns <- names(column_arguments)[
+        !vapply(column_arguments, scalar_character, logical(1))
+    ]
+    if (length(invalid_columns) > 0L) {
+        stop(
+            paste(invalid_columns, collapse = ", "),
+            " must be non-empty character scalars."
+        )
+    }
+    if (identical(sample_col, "LibrarySize")) {
+        stop("sample_col cannot use the reserved calculated column 'LibrarySize'.")
+    }
+    if (!is.null(save) && !scalar_character(save)) {
+        stop("save must be NULL or one non-empty character path.")
+    }
+    logical_arguments <- list(
+        label_samples = label_samples,
+        connect_samples = connect_samples,
+        verbose = verbose
+    )
+    invalid_logical <- names(logical_arguments)[
+        !vapply(logical_arguments, scalar_logical, logical(1))
+    ]
+    if (length(invalid_logical) > 0L) {
+        stop(
+            paste(invalid_logical, collapse = ", "),
+            " must be non-missing logical scalars."
+        )
+    }
+    numeric_values <- list(
+        point_size = point_size,
+        point_alpha = point_alpha,
+        label_size = label_size,
+        width = width,
+        height = height
+    )
+    numeric_ranges <- list(
+        point_size = c(0, Inf),
+        point_alpha = c(0, 1),
+        label_size = c(0, Inf),
+        width = c(0, Inf),
+        height = c(0, Inf)
+    )
+    for (argument_name in names(numeric_values)) {
+        value <- numeric_values[[argument_name]]
+        supported_range <- numeric_ranges[[argument_name]]
+        if (length(value) != 1L || !is.numeric(value) || is.na(value) ||
+            !is.finite(value) || value < supported_range[1] ||
+            value > supported_range[2] ||
+            (argument_name != "point_alpha" && value == 0)) {
+            stop(argument_name, " is outside its supported numeric range.")
+        }
+    }
+    if (length(ncol) != 1L || !is.numeric(ncol) || is.na(ncol) ||
+        !is.finite(ncol) || ncol < 1 || ncol != round(ncol)) {
+        stop("ncol must be a positive integer.")
+    }
+    ncol <- as.integer(ncol)
+
+    if (!sample_col %in% colnames(meta)) {
+        meta[[sample_col]] <- rownames(meta)
+    }
+    meta[[sample_col]] <- as.character(meta[[sample_col]])
+    if (anyNA(meta[[sample_col]]) || any(!nzchar(meta[[sample_col]])) ||
+        anyDuplicated(meta[[sample_col]])) {
+        stop("sample_col must contain unique, non-empty sample identifiers.")
+    }
+    meta$LibrarySize <- as.numeric(colSums(counts))
+
+    required_columns <- unique(c(metrics, color_by, facet_by, sample_col))
+    missing_columns <- setdiff(required_columns, colnames(meta))
+    if (length(missing_columns) > 0L) {
+        stop(
+            "These variables are missing from metadata: ",
+            paste(missing_columns, collapse = ", ")
+        )
+    }
+    if (identical(color_by, "LibrarySize") ||
+        identical(facet_by, "LibrarySize")) {
+        stop("color_by and facet_by must name categorical metadata columns.")
+    }
+    metric_group_overlap <- intersect(metrics, c(color_by, facet_by))
+    if (length(metric_group_overlap) > 0L) {
+        stop(
+            "QC metrics cannot also be used as categorical grouping columns: ",
+            paste(metric_group_overlap, collapse = ", ")
+        )
+    }
+    if (anyNA(meta[[color_by]]) || anyNA(meta[[facet_by]])) {
+        stop("color_by and facet_by cannot contain missing values.")
+    }
+    if (any(!nzchar(as.character(meta[[color_by]]))) ||
+        any(!nzchar(as.character(meta[[facet_by]])))) {
+        stop("color_by and facet_by cannot contain empty group labels.")
+    }
+    invalid_metrics <- metrics[
+        !vapply(meta[metrics], is.numeric, logical(1))
+    ]
+    if (length(invalid_metrics) > 0L) {
+        stop(
+            "Requested metrics must be numeric: ",
+            paste(invalid_metrics, collapse = ", ")
+        )
+    }
+    nonfinite_metrics <- metrics[
+        vapply(
+            meta[metrics],
+            function(x) any(!is.finite(x[!is.na(x)])),
+            logical(1)
+        )
+    ]
+    if (length(nonfinite_metrics) > 0L) {
+        stop(
+            "Requested metrics contain non-finite values: ",
+            paste(nonfinite_metrics, collapse = ", ")
+        )
+    }
+    empty_metrics <- metrics[
+        vapply(meta[metrics], function(x) all(is.na(x)), logical(1))
+    ]
+    if (length(empty_metrics) > 0L) {
+        stop(
+            "Requested metrics contain no observed values: ",
+            paste(empty_metrics, collapse = ", ")
+        )
+    }
+
+    observed_colors <- unique(as.character(meta[[color_by]]))
+    if (is.null(color_order)) {
+        color_order <- observed_colors
+    } else {
+        if (!is.character(color_order) || anyNA(color_order) ||
+            any(!nzchar(color_order)) || anyDuplicated(color_order)) {
+            stop("color_order must contain unique, non-empty labels.")
+        }
+        missing_levels <- setdiff(observed_colors, color_order)
+        if (length(missing_levels) > 0L) {
+            stop(
+                "color_order is missing observed groups: ",
+                paste(missing_levels, collapse = ", ")
+            )
+        }
+    }
+    meta[[color_by]] <- factor(
+        as.character(meta[[color_by]]), levels = color_order
+    )
+    color_levels <- levels(droplevels(meta[[color_by]]))
+
+    if (is.null(colors)) {
+        if (length(color_levels) <= length(BULK_QC_MACARON_COLORS)) {
+            colors <- BULK_QC_MACARON_COLORS[seq_along(color_levels)]
+        } else {
+            colors <- grDevices::hcl.colors(
+                length(color_levels), palette = "Pastel 1"
+            )
+        }
+        names(colors) <- color_levels
+    } else {
+        if (!is.character(colors) || length(colors) == 0L || anyNA(colors)) {
+            stop("colors must be a non-empty character vector without NA.")
+        }
+        if (is.null(names(colors))) {
+            if (length(colors) < length(color_levels)) {
+                stop("Not enough colors supplied. Need ", length(color_levels), ".")
+            }
+            colors <- colors[seq_along(color_levels)]
+            names(colors) <- color_levels
+        } else {
+            if (anyDuplicated(names(colors))) {
+                stop("Named colors must have unique names.")
+            }
+            missing_colors <- setdiff(color_levels, names(colors))
+            if (length(missing_colors) > 0L) {
+                stop("Missing colors for: ", paste(missing_colors, collapse = ", "))
+            }
+            colors <- colors[color_levels]
+        }
+    }
+
+    meta <- meta[
+        order(meta[[facet_by]], meta[[color_by]], meta[[sample_col]]),
+        ,
+        drop = FALSE
+    ]
+    cell_theme <- ggplot2::theme_classic(base_size = 10) +
+        ggplot2::theme(
+            panel.grid = ggplot2::element_blank(),
+            axis.line = ggplot2::element_line(colour = "black", linewidth = 0.5),
+            axis.ticks = ggplot2::element_line(colour = "black", linewidth = 0.4),
+            axis.text = ggplot2::element_text(colour = "black", size = 8),
+            axis.title = ggplot2::element_text(colour = "black", size = 9),
+            strip.background = ggplot2::element_blank(),
+            strip.text = ggplot2::element_text(
+                face = "bold", colour = "black", size = 9
+            ),
+            legend.title = ggplot2::element_text(size = 9),
+            legend.text = ggplot2::element_text(size = 8),
+            legend.key = ggplot2::element_blank(),
+            plot.title = ggplot2::element_text(
+                face = "bold", size = 10, hjust = 0.5
+            ),
+            plot.margin = ggplot2::margin(5.5, 5.5, 5.5, 5.5)
+        )
+    metric_titles <- c(
+        Total_input_reads = "Total input reads",
+        Assigned_reads = "Assigned reads",
+        LibrarySize = "Count matrix library size",
+        Assignment_percent = "Assignment rate (%)"
+    )
+
+    plot_list <- list()
+    for (metric in metrics) {
+        plot_data <- meta
+        plot_data$SamplePlot <- factor(
+            plot_data[[sample_col]], levels = unique(plot_data[[sample_col]])
+        )
+        plot <- ggplot2::ggplot(
+            plot_data,
+            ggplot2::aes(
+                x = SamplePlot,
+                y = .data[[metric]],
+                colour = .data[[color_by]]
+            )
+        )
+        if (connect_samples) {
+            plot <- plot + ggplot2::geom_line(
+                ggplot2::aes(group = .data[[color_by]]),
+                linewidth = 0.4,
+                alpha = 0.45
+            )
+        }
+        plot <- plot + ggplot2::geom_point(
+            size = point_size,
+            alpha = point_alpha,
+            stroke = 0.3
+        )
+        if (label_samples) {
+            plot <- plot + ggrepel::geom_text_repel(
+                ggplot2::aes(label = .data[[sample_col]]),
+                size = label_size,
+                box.padding = 0.25,
+                point.padding = 0.2,
+                max.overlaps = Inf,
+                show.legend = FALSE
+            )
+        }
+        plot <- plot +
+            ggplot2::facet_wrap(
+                stats::reformulate(facet_by), scales = "free_x"
+            ) +
+            ggplot2::scale_colour_manual(
+                values = colors, breaks = color_levels, drop = FALSE
+            )
+        if (metric %in% c(
+            "Total_input_reads", "Assigned_reads", "LibrarySize"
+        )) {
+            plot <- plot + ggplot2::scale_y_continuous(
+                labels = scales::label_number(
+                    scale_cut = scales::cut_short_scale()
+                ),
+                expand = ggplot2::expansion(mult = c(0.05, 0.12))
+            )
+        } else {
+            plot <- plot + ggplot2::scale_y_continuous(
+                expand = ggplot2::expansion(mult = c(0.05, 0.12))
+            )
+        }
+        pretty_title <- if (metric %in% names(metric_titles)) {
+            metric_titles[[metric]]
+        } else {
+            metric
+        }
+        plot <- plot +
+            ggplot2::labs(
+                x = NULL,
+                y = pretty_title,
+                colour = color_by,
+                title = pretty_title
+            ) +
+            cell_theme +
+            ggplot2::theme(
+                axis.text.x = ggplot2::element_blank(),
+                axis.ticks.x = ggplot2::element_blank()
+            )
+        plot_list[[metric]] <- plot
+    }
+
+    combined <- patchwork::wrap_plots(
+        plot_list, ncol = ncol, guides = "collect"
+    ) & ggplot2::theme(legend.position = "right")
+    if (!is.null(save)) {
+        if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
+            ggplot2::ggsave(
+                filename = save,
+                plot = combined,
+                width = width,
+                height = height,
+                units = "in",
+                device = grDevices::cairo_pdf
+            )
+        } else {
+            ggplot2::ggsave(
+                filename = save,
+                plot = combined,
+                width = width,
+                height = height,
+                units = "in",
+                dpi = 300
+            )
+        }
+    }
+
+    if (verbose) {
+        message("")
+        message("======================================")
+        message(" Bulk RNA-seq sample QC")
+        message("======================================")
+        message("Samples: ", nrow(meta))
+        assignment_values <- if (
+            "Assignment_percent" %in% colnames(meta) &&
+            is.numeric(meta$Assignment_percent)
+        ) {
+            meta$Assignment_percent[is.finite(meta$Assignment_percent)]
+        } else {
+            numeric(0)
+        }
+        if (length(assignment_values) > 0L) {
+            message(
+                "Assignment rate: ",
+                round(min(assignment_values), 1),
+                "% - ",
+                round(max(assignment_values), 1),
+                "%"
+            )
+        }
+        message("======================================")
+    }
+
+    list(
+        plot = combined,
+        plots = plot_list,
+        metadata = meta,
+        colors = colors
     )
 }

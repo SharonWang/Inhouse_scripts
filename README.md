@@ -292,6 +292,7 @@ functions supplied in R.
 | Pairwise differential expression | `edgeR_pairwise()` | Runs comparison-specific filtering, TMM normalization, dispersion estimation, and an edgeR quasi-likelihood test. | Annotated results plus DGEList, fit, test, design, contrast, and sample details. |
 | Pairwise differential expression | `limma_voom_pairwise()` | Runs comparison-specific filtering, TMM normalization, voom weighting, and a limma empirical Bayes test. | Annotated results plus DGEList, voom data, fit, design, contrast, and sample details. |
 | Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
+| Bulk/pseudobulk quality-control visualization | `plot_bulk_qc()` | Calculates count-matrix library sizes and plots selected sample-level read, assignment, and library metrics in faceted panels. | Combined patchwork figure, individual metric plots, plotting metadata, and colour mapping. |
 
 ### `read_featurecounts_project(...)`
 
@@ -497,11 +498,49 @@ not a replacement for design-aware differential-expression analysis. Its
 required packages are edgeR and ggplot2, plus ggrepel only when sample labels
 are requested.
 
+### `plot_bulk_qc(...)`
+
+Builds a compact overview of sample-level sequencing and assignment QC. The
+default panels show total input reads, assigned reads, count-matrix library
+size, and assignment percentage. `LibrarySize` is always recalculated from the
+aligned raw count matrix, so the panel reflects the project currently being
+plotted rather than a potentially stale metadata field.
+
+```r
+qc_result <- plot_bulk_qc(
+  project,
+  color_by = "Condition",
+  facet_by = "Sorting",
+  color_order = c("Control", "Treated"),
+  label_samples = TRUE,
+  ncol = 2,
+  save = "outputs/bulk_sample_qc.pdf"
+)
+
+qc_result$plot
+qc_result$plots$Assignment_percent
+qc_result$metadata[, c("SampleName", "LibrarySize")]
+```
+
+Each requested metric must be numeric and contain at least one observed finite
+value; missing individual observations are allowed. Samples are sorted by
+facet, colour group, and sample identifier before plotting. The optional
+`connect_samples` lines follow this display order and should be enabled only
+when connecting sequential samples within a group has a meaningful
+interpretation. Sample labels require ggrepel.
+
+The function returns the combined patchwork figure, every individual ggplot,
+a sorted metadata copy containing the recalculated library size, and the exact
+named colour mapping. It does not modify the input project or apply QC
+exclusion thresholds. Required packages are ggplot2, patchwork, and scales;
+PDF output uses Cairo and other figure formats are saved at 300 dpi.
+
 ### Reusable R palettes
 
 | Palette | Colours | Intended use |
 |---|---|---|
 | `BULK_PCA_MACARON_COLORS` | 15 muted pastel hexadecimal colours | Default ordered groups in `plot_bulk_pca()` and other bulk/pseudobulk visualizations. |
+| `BULK_QC_MACARON_COLORS` | 12 muted colours beginning with neutral grey | Default ordered groups in `plot_bulk_qc()`, especially when the first group is a reference or control. |
 
 The palette is stored as an unnamed character vector so a plotting function
 can assign colours consistently after applying the requested group order. Pass
