@@ -600,18 +600,26 @@ manhattan_result$labels
 
 Gene positions can be shared across panels using mean log fold change,
 alphabetical gene label, or first input appearance, or ordered independently
-within each panel by log fold change. Significant and non-significant genes
-retain the same comparison colour but use different opacity and point size.
-Faceting and positive/negative position provide non-colour distinctions.
-Optional labels are selected separately within every sorting-by-comparison
-panel; manually requested genes are always eligible. Labels require ggrepel,
+within each panel by log fold change. Case-insensitive alphabetical ordering is
+the default. Significant and non-significant genes retain the same comparison
+colour but use different opacity and point size. Faceting and positive/negative
+position provide non-colour distinctions.
+
+Automatic labels are selected separately within every
+sorting-by-comparison panel, ranked first by smallest FDR and then by the
+stronger directional effect; manually requested genes are always eligible.
+Label placement uses a stable internal row identifier and a fixed ggrepel seed,
+with expanded unclipped y-axis space for edge labels. Labels require ggrepel,
 while optional rasterized points use ggrastr when installed and otherwise fall
 back to ordinary ggplot2 points.
 
 The returned data retain uncapped signed scores, capped display scores, cutoff
-classes, gene keys, and a `Capped` indicator. This overview does not replace
-the effect sizes, uncertainty, study design, replication checks, or complete
-differential-expression tables required for interpretation.
+classes, gene keys, and a `Capped` indicator. When `cap_y` is supplied,
+open upward and downward triangles mark clipped values by default. The return
+also includes per-panel significance and label summaries plus the applied
+cap. This overview does not replace the effect sizes, uncertainty, study
+design, replication checks, or complete differential-expression tables
+required for interpretation.
 
 ### Reusable R palettes
 

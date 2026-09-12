@@ -3480,7 +3480,8 @@ plot_bulk_qc <- function(
 #' @param raster_dpi Positive integer passed to `ggrastr` as raster resolution.
 #' @param label_top_up,label_top_down Non-negative integers giving the maximum
 #'   number of positive- and negative-effect genes labelled per panel, ranked
-#'   by signed significance.
+#'   first by smallest adjusted p-value and then by larger absolute effect in
+#'   the requested direction.
 #' @param label_genes `NULL` or a character vector of additional gene labels or
 #'   stable IDs to label in every matching panel.
 #' @param label_only_significant Logical scalar. Whether automatic top-gene
@@ -3491,6 +3492,9 @@ plot_bulk_qc <- function(
 #' @param cap_y `NULL` or a positive numeric scalar. Scores outside
 #'   `[-cap_y, cap_y]` are clipped for display and marked in the returned
 #'   `Capped` column; uncapped values remain in `SignedLogFDR`.
+#' @param show_capped_triangles Logical scalar. When `cap_y` is used, whether
+#'   upward and downward open triangles should mark genes clipped at the upper
+#'   and lower display boundaries.
 #' @param facet_by_sorting Logical scalar. When multiple sorting groups are
 #'   present, whether to use sorting rows and comparison columns.
 #' @param facet_ncol `NULL` or a positive integer controlling comparison columns
@@ -3502,7 +3506,7 @@ plot_bulk_qc <- function(
 #' @param x_title Character scalar used as the x-axis title.
 #' @param width Positive numeric scalar giving saved figure width in inches.
 #' @param height `NULL` or a positive numeric scalar giving saved figure height
-#'   in inches. The default is 3.5 inches for a single row or at least 2.2
+#'   in inches. The default is 4 inches for a single row or at least 2.4
 #'   inches per sorting row.
 #' @param save `NULL` or a character scalar giving an output figure path. PDF
 #'   files use `grDevices::cairo_pdf`; other formats are written at 300 dpi.
@@ -3516,11 +3520,14 @@ plot_bulk_qc <- function(
 #'       x positions, signed scores, significance classes, and cap indicators.}
 #'     \item{labels}{Rows selected for gene labelling.}
 #'     \item{summary}{Per-sorting/per-comparison counts of tested, significant,
-#'       comparison-up, and reference-up genes.}
+#'       comparison-up, reference-up, and capped genes.}
+#'     \item{label_summary}{Per-panel counts of selected labels, or an empty
+#'       data frame when no genes are labelled.}
 #'     \item{colors}{Named colours used for displayed comparisons.}
 #'     \item{comparison_labels}{Named raw-to-display comparison mapping.}
 #'     \item{fdr_cutoff}{Adjusted-p-value cutoff used by the plot.}
 #'     \item{logfc_cutoff}{Absolute log2-fold-change cutoff used by the plot.}
+#'     \item{cap_y}{The requested signed-score display cap, or `NULL`.}
 #'   }
 #'
 #' @details
@@ -3561,22 +3568,23 @@ plot_signed_manhattan <- function(
     sorting_order = NULL,
     comparison_order = NULL,
     comparison_labels = NULL,
-    gene_order = c("mean_logFC", "alphabetical", "input", "panel_logFC"),
+    gene_order = c("alphabetical", "mean_logFC", "input", "panel_logFC"),
     fdr_cutoff = 0.05,
     logfc_cutoff = 0,
     colors = NULL,
-    ns_alpha = 0.22,
+    ns_alpha = 0.20,
     sig_alpha = 0.85,
-    point_size = 0.55,
+    point_size = 0.5,
     rasterized = FALSE,
     raster_dpi = 300,
     label_top_up = 5,
     label_top_down = 5,
     label_genes = NULL,
     label_only_significant = TRUE,
-    label_size = 2.5,
+    label_size = 2.4,
     italic_gene_labels = TRUE,
     cap_y = NULL,
+    show_capped_triangles = TRUE,
     facet_by_sorting = TRUE,
     facet_ncol = NULL,
     facet_scales = "fixed",
@@ -3584,7 +3592,7 @@ plot_signed_manhattan <- function(
     show_fdr_line = TRUE,
     title = NULL,
     x_title = "Genes",
-    width = 10,
+    width = 11,
     height = NULL,
     save = NULL,
     verbose = TRUE
@@ -3627,6 +3635,7 @@ plot_signed_manhattan <- function(
         rasterized = rasterized,
         label_only_significant = label_only_significant,
         italic_gene_labels = italic_gene_labels,
+        show_capped_triangles = show_capped_triangles,
         facet_by_sorting = facet_by_sorting,
         show_zero_line = show_zero_line,
         show_fdr_line = show_fdr_line,
@@ -3897,13 +3906,13 @@ plot_signed_manhattan <- function(
         }
     }
 
-    if (gene_order == "mean_logFC") {
+    if (gene_order == "alphabetical") {
+        gene_labels <- tapply(df$.GeneLabel, df$.GeneKey, function(x) x[1])
+        gene_key_order <- names(sort(tolower(gene_labels)))
+        df$GeneIndex <- match(df$.GeneKey, gene_key_order)
+    } else if (gene_order == "mean_logFC") {
         gene_means <- tapply(df[[logfc_col]], df$.GeneKey, mean, na.rm = TRUE)
         gene_key_order <- names(sort(gene_means, decreasing = FALSE))
-        df$GeneIndex <- match(df$.GeneKey, gene_key_order)
-    } else if (gene_order == "alphabetical") {
-        gene_labels <- tapply(df$.GeneLabel, df$.GeneKey, function(x) x[1])
-        gene_key_order <- names(sort(gene_labels))
         df$GeneIndex <- match(df$.GeneKey, gene_key_order)
     } else if (gene_order == "input") {
         gene_key_order <- unique(df$.GeneKey)
@@ -3929,6 +3938,7 @@ plot_signed_manhattan <- function(
         df$SignedLogFDR_plot <- pmax(pmin(df$SignedLogFDR, cap_y), -cap_y)
     }
 
+    df$.row_id <- seq_len(nrow(df))
     panel_indices <- split(
         seq_len(nrow(df)),
         interaction(df$Sorting, df$ComparisonLabel, drop = TRUE)
@@ -3944,13 +3954,13 @@ plot_signed_manhattan <- function(
         negative <- candidates[df[[logfc_col]][candidates] < 0]
         if (label_top_up > 0 && length(positive) > 0L) {
             positive <- positive[
-                order(df$SignedLogFDR[positive], decreasing = TRUE)
+                order(df[[padj_col]][positive], -df[[logfc_col]][positive])
             ]
             label_rows <- c(label_rows, head(positive, label_top_up))
         }
         if (label_top_down > 0 && length(negative) > 0L) {
             negative <- negative[
-                order(df$SignedLogFDR[negative], decreasing = FALSE)
+                order(df[[padj_col]][negative], df[[logfc_col]][negative])
             ]
             label_rows <- c(label_rows, head(negative, label_top_down))
         }
@@ -3958,11 +3968,13 @@ plot_signed_manhattan <- function(
     if (!is.null(label_genes)) {
         label_rows <- c(
             label_rows,
-            which(df$.GeneLabel %in% label_genes | df$.GeneKey %in% label_genes)
+            df$.row_id[
+                df$.GeneLabel %in% label_genes | df$.GeneKey %in% label_genes
+            ]
         )
     }
-    label_rows <- unique(label_rows)
-    label_df <- df[label_rows, , drop = FALSE]
+    label_rows <- unique(label_rows[!is.na(label_rows)])
+    label_df <- df[df$.row_id %in% label_rows, , drop = FALSE]
 
     plot <- ggplot2::ggplot(
         df,
@@ -3977,7 +3989,7 @@ plot_signed_manhattan <- function(
         fdr_line <- -log10(fdr_cutoff)
         plot <- plot + ggplot2::geom_hline(
             yintercept = c(-fdr_line, fdr_line),
-            linewidth = 0.35,
+            linewidth = 0.3,
             linetype = "dashed",
             colour = "#A0A0A0"
         )
@@ -3996,7 +4008,7 @@ plot_signed_manhattan <- function(
             ggrastr::geom_point_rast(
                 data = significant_data,
                 ggplot2::aes(colour = ComparisonLabel),
-                size = point_size * 1.15,
+                size = point_size * 1.2,
                 alpha = sig_alpha,
                 raster.dpi = raster_dpi
             )
@@ -4012,31 +4024,44 @@ plot_signed_manhattan <- function(
             ggplot2::geom_point(
                 data = significant_data,
                 ggplot2::aes(colour = ComparisonLabel),
-                size = point_size * 1.15,
+                size = point_size * 1.2,
                 alpha = sig_alpha,
                 stroke = 0
             )
     }
-    if (nrow(label_df) > 0L) {
-        plot <- plot + ggrepel::geom_text_repel(
-            data = label_df,
-            ggplot2::aes(
-                x = GeneIndex,
-                y = SignedLogFDR_plot,
-                label = .GeneLabel
-            ),
-            inherit.aes = FALSE,
-            colour = "black",
-            size = label_size,
-            fontface = if (italic_gene_labels) "italic" else "plain",
-            box.padding = 0.25,
-            point.padding = 0.15,
-            min.segment.length = 0,
-            segment.linewidth = 0.25,
-            segment.colour = "#777777",
-            max.overlaps = Inf,
-            show.legend = FALSE
-        )
+    if (!is.null(cap_y) && show_capped_triangles) {
+        capped_up <- df[df$Capped & df$SignedLogFDR > 0, , drop = FALSE]
+        capped_down <- df[df$Capped & df$SignedLogFDR < 0, , drop = FALSE]
+        if (nrow(capped_up) > 0L) {
+            plot <- plot + ggplot2::geom_point(
+                data = capped_up,
+                mapping = ggplot2::aes(
+                    x = GeneIndex,
+                    y = SignedLogFDR_plot,
+                    colour = ComparisonLabel
+                ),
+                inherit.aes = FALSE,
+                shape = 24,
+                size = point_size * 2.2,
+                stroke = 0.35,
+                fill = "white"
+            )
+        }
+        if (nrow(capped_down) > 0L) {
+            plot <- plot + ggplot2::geom_point(
+                data = capped_down,
+                mapping = ggplot2::aes(
+                    x = GeneIndex,
+                    y = SignedLogFDR_plot,
+                    colour = ComparisonLabel
+                ),
+                inherit.aes = FALSE,
+                shape = 25,
+                size = point_size * 2.2,
+                stroke = 0.35,
+                fill = "white"
+            )
+        }
     }
 
     n_sorting <- length(unique(as.character(df$Sorting)))
@@ -4054,6 +4079,39 @@ plot_signed_manhattan <- function(
             scales = facet_scales
         )
     }
+    plot <- plot + ggplot2::scale_colour_manual(
+        values = colors, drop = FALSE
+    )
+    if (nrow(label_df) > 0L) {
+        plot <- plot + ggrepel::geom_text_repel(
+            data = label_df,
+            ggplot2::aes(
+                x = GeneIndex,
+                y = SignedLogFDR_plot,
+                label = .GeneLabel
+            ),
+            inherit.aes = FALSE,
+            colour = "black",
+            size = label_size,
+            fontface = if (italic_gene_labels) "italic" else "plain",
+            box.padding = 0.35,
+            point.padding = 0.20,
+            force = 1.5,
+            force_pull = 0.3,
+            min.segment.length = 0,
+            segment.linewidth = 0.25,
+            segment.colour = "#777777",
+            max.overlaps = Inf,
+            seed = 123,
+            show.legend = FALSE
+        )
+    }
+    plot <- plot +
+        ggplot2::scale_y_continuous(
+            expand = ggplot2::expansion(mult = c(0.12, 0.12))
+        ) +
+        ggplot2::coord_cartesian(clip = "off")
+
     y_axis_title <- if (identical(padj_col, "FDR") &&
         identical(logfc_col, "logFC")) {
         expression(-log[10](FDR) %*% sign(logFC))
@@ -4061,7 +4119,6 @@ plot_signed_manhattan <- function(
         paste0("-log10(", padj_col, ") x sign(", logfc_col, ")")
     }
     plot <- plot +
-        ggplot2::scale_colour_manual(values = colors, drop = FALSE) +
         ggplot2::labs(
             x = x_title,
             y = y_axis_title,
@@ -4089,14 +4146,14 @@ plot_signed_manhattan <- function(
                 colour = "black", face = "bold", size = 10, hjust = 0
             ),
             legend.position = "none",
-            plot.margin = ggplot2::margin(5.5, 10, 5.5, 5.5)
+            plot.margin = ggplot2::margin(8, 14, 8, 8)
         )
 
     if (is.null(height)) {
         height <- if (facet_by_sorting && n_sorting > 1L) {
-            max(3.5, n_sorting * 2.2)
+            max(4, n_sorting * 2.4)
         } else {
-            3.5
+            4
         }
     }
     if (!is.null(save)) {
@@ -4128,28 +4185,66 @@ plot_signed_manhattan <- function(
     summary_df <- do.call(rbind, lapply(summary_indices, function(indices) {
         data.frame(
             Sorting = as.character(df$Sorting[indices[1]]),
-            ComparisonLabel = as.character(df$ComparisonLabel[indices[1]]),
+            Comparison = as.character(df$Comparison[indices[1]]),
             Genes_tested = length(indices),
             Significant = sum(df$Significance[indices] != "NS"),
             Up_comparison = sum(df$Significance[indices] == "Up"),
             Up_reference = sum(df$Significance[indices] == "Down"),
+            Capped = sum(df$Capped[indices]),
             stringsAsFactors = FALSE
         )
     }))
     rownames(summary_df) <- NULL
+
+    if (nrow(label_df) > 0L) {
+        label_summary_indices <- split(
+            seq_len(nrow(label_df)),
+            interaction(
+                label_df$Sorting,
+                label_df$ComparisonLabel,
+                drop = TRUE
+            )
+        )
+        label_summary <- do.call(
+            rbind,
+            lapply(label_summary_indices, function(indices) {
+                data.frame(
+                    Sorting = as.character(label_df$Sorting[indices[1]]),
+                    ComparisonLabel = as.character(
+                        label_df$ComparisonLabel[indices[1]]
+                    ),
+                    Labels = length(indices),
+                    stringsAsFactors = FALSE
+                )
+            })
+        )
+        rownames(label_summary) <- NULL
+    } else {
+        label_summary <- data.frame()
+    }
 
     if (verbose) {
         message("")
         message("============================================")
         message(" Signed Manhattan plot")
         message("============================================")
-        message("Analyses:       ", analysis_count)
-        message("Sorting groups: ", n_sorting)
-        message("Comparisons:    ", length(display_levels))
-        message("FDR cutoff:     ", fdr_cutoff)
-        message("logFC cutoff:   ", logfc_cutoff)
+        message("Analyses:            ", analysis_count)
+        message("Sorting populations: ", n_sorting)
+        message("Comparisons:         ", length(unique(df$Comparison)))
+        message("FDR cutoff:          ", fdr_cutoff)
+        message("logFC cutoff:        ", logfc_cutoff)
+        message("Gene order:          ", gene_order)
+        if (!is.null(cap_y)) {
+            message("Y-axis cap:          +/-", cap_y)
+        }
+        message("Genes labeled:       ", nrow(label_df))
         message("")
         print(summary_df)
+        if (nrow(label_summary) > 0L) {
+            message("")
+            message("Labels per panel:")
+            print(label_summary)
+        }
         message("============================================")
     }
 
@@ -4158,9 +4253,11 @@ plot_signed_manhattan <- function(
         data = df,
         labels = label_df,
         summary = summary_df,
+        label_summary = label_summary,
         colors = colors,
         comparison_labels = label_map,
         fdr_cutoff = fdr_cutoff,
-        logfc_cutoff = logfc_cutoff
+        logfc_cutoff = logfc_cutoff,
+        cap_y = cap_y
     )
 }

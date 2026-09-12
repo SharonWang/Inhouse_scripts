@@ -43,6 +43,13 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Updated `plot_signed_manhattan()` with case-insensitive alphabetical ordering
+  as the default, revised point and export dimensions, and FDR-first label
+  ranking with directional log-fold-change tie breaking.
+- Added stable row identifiers, reproducible expanded ggrepel placement,
+  optional upward/downward triangles for capped genes, capped counts in the
+  panel summary, a separate label summary, and the applied `cap_y` in the
+  returned object.
 - Preserved original fold changes and FDR values while protecting signed plots
   from exact zero FDR values using a bounded plotting-only replacement.
 - Centralized list extraction for the collector and plotter, while allowing the
@@ -78,6 +85,10 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated tests were not added or run, following the user's standing
   instruction.
+- Reviewed the revised signed-Manhattan defaults, label ranking and identity,
+  capped-point layers, facet-aware label placement, plot expansion, summary
+  fields, return interface, Roxygen documentation, README, and Git diff before
+  committing.
 - Reviewed the edgeR collection provenance, effect direction, FDR-zero handling,
   gene ordering, label selection, facet structure, plotting layers, reusable
   palette, Roxygen interfaces, README examples, and Git diff before committing.
@@ -92,6 +103,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Commit
 
+- `feat: refine signed Manhattan labels and capping` — Updated the existing
+  function with stable FDR-ranked labels, capped-point indicators, expanded
+  plotting space, additional summaries, revised defaults, and documentation.
 - `feat: add pairwise DE collector and signed Manhattan plot` — Added the two
   documented DE overview utilities, shared extraction, reusable palette,
   safeguards, and README guidance.
