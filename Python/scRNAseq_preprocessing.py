@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 __all__ = [
     "MHCII_GROUP_COLORS",
     "WT_CKO_COLORS",
+    "cluster_expression_summary",
     "convert_genes_to_features",
     "ordmag_filter",
     "plot_adata_stacked_bar",
@@ -697,6 +698,182 @@ def score_and_assign_two_signatures(
         print(pd.DataFrame({"n": counts, "percent": percentages}))
 
     return adata
+
+
+# =============================================================================
+# Cluster-level expression summaries
+# =============================================================================
+
+
+def cluster_expression_summary(
+    adata: AnnData,
+    genes: Iterable[str],
+    groupby: str,
+    layer: str | None = None,
+) -> pd.DataFrame:
+    """Summarize mean expression and detection percentage by cell group.
+
+    This cluster-level summary is useful for sparse targeted spatial-
+    transcriptomics and single-cell RNA-seq data, where individual-cell marker
+    gating may be unstable. For each observed group and available requested
+    gene, the function reports mean expression and the percentage of cells
+    whose expression value is greater than zero.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object with cells or spots in rows, genes in columns, and the
+        grouping variable in ``adata.obs``. The object is read but not
+        modified.
+    genes : iterable of str
+        Gene names to summarize. Names are matched exactly against
+        ``adata.var_names``. Duplicate requested names are removed while
+        preserving their first-occurrence order. Missing genes are ignored,
+        but at least one requested gene must be available.
+    groupby : str
+        Name of the ``adata.obs`` column defining the groups to summarize.
+        The column must exist and contain no missing values. Observed group
+        labels are converted to strings and returned in alphabetical order.
+    layer : str, optional
+        Name of an expression matrix in ``adata.layers``. If ``None``, values
+        are read from ``adata.X``. The selected matrix may be dense or a SciPy
+        sparse matrix.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Long-form table with one row per observed group and available gene.
+        The grouping column is named by ``groupby`` and is followed by
+        ``gene``, ``mean_expression``, ``pct_expressing``, and ``n_cells``.
+        ``pct_expressing`` is the percentage of cells or spots with a selected
+        expression value greater than zero, and ``n_cells`` is repeated for
+        every gene within the corresponding group.
+
+    Raises
+    ------
+    TypeError
+        If ``genes`` is a string rather than an iterable of gene names, if a
+        requested gene name is not a non-empty string, or if ``groupby`` or
+        ``layer`` has an invalid type.
+    KeyError
+        If ``groupby`` is absent from ``adata.obs`` or the requested ``layer``
+        is absent from ``adata.layers``.
+    ValueError
+        If no genes were requested, none are present in ``adata.var_names``,
+        variable names are duplicated, the grouping column is empty or
+        contains missing values, or the selected expression matrix contains
+        non-finite values.
+
+    Examples
+    --------
+    >>> summary = cluster_expression_summary(
+    ...     adata,
+    ...     genes=["EPCAM", "KRT8", "KRT18"],
+    ...     groupby="leiden",
+    ...     layer="log1p",
+    ... )
+    >>> summary.head()
+
+    Notes
+    -----
+    The selected expression representation determines the interpretation of
+    both output metrics. Detection percentages are most naturally interpreted
+    for non-negative count or normalized-expression matrices in which zero
+    represents no detected transcript. On centred or scaled layers, values
+    greater than zero instead mean values above that layer's zero point.
+
+    Sparse inputs remain sparse during group subsetting; only the small
+    per-group summary vectors are converted to dense NumPy arrays.
+    """
+    if isinstance(genes, (str, bytes)) or not isinstance(genes, Iterable):
+        raise TypeError("genes must be an iterable of non-empty strings")
+
+    requested_genes: list[str] = []
+    seen_genes: set[str] = set()
+    for gene in genes:
+        if not isinstance(gene, str) or not gene:
+            raise TypeError("each gene must be a non-empty string")
+        if gene not in seen_genes:
+            requested_genes.append(gene)
+            seen_genes.add(gene)
+
+    if not requested_genes:
+        raise ValueError("genes must contain at least one gene name")
+
+    if not getattr(adata.var_names, "is_unique", True):
+        raise ValueError("adata.var_names must contain unique gene names")
+
+    available_genes = [
+        gene for gene in requested_genes if gene in adata.var_names
+    ]
+    if not available_genes:
+        raise ValueError("None of the requested genes are in adata.var_names")
+
+    if not isinstance(groupby, str):
+        raise TypeError("groupby must be a string")
+    if not groupby:
+        raise ValueError("groupby must be a non-empty column name")
+    if groupby not in adata.obs.columns:
+        raise KeyError(f"groupby column not found in adata.obs: {groupby}")
+
+    groups = adata.obs[groupby]
+    if groups.empty:
+        raise ValueError(f"adata.obs[{groupby!r}] must contain at least one value")
+    if groups.isna().any():
+        raise ValueError(f"adata.obs[{groupby!r}] contains missing values")
+    group_labels = groups.astype(str)
+
+    if layer is not None:
+        if not isinstance(layer, str):
+            raise TypeError("layer must be a string or None")
+        if not layer:
+            raise ValueError("layer must be a non-empty name when supplied")
+        if layer not in adata.layers:
+            raise KeyError(f"layer not found in adata.layers: {layer}")
+
+    adata_genes = adata[:, available_genes]
+    expression = (
+        adata_genes.layers[layer] if layer is not None else adata_genes.X
+    )
+
+    if sparse.issparse(expression):
+        expression = expression.tocsr()
+        if not np.isfinite(expression.data).all():
+            raise ValueError("selected expression matrix contains non-finite values")
+    else:
+        expression = np.asarray(expression)
+        if not np.isfinite(expression).all():
+            raise ValueError("selected expression matrix contains non-finite values")
+
+    results: list[pd.DataFrame] = []
+    for group in sorted(group_labels.unique()):
+        mask = group_labels.to_numpy() == group
+        group_expression = expression[mask]
+
+        if sparse.issparse(group_expression):
+            mean_expression = np.asarray(
+                group_expression.mean(axis=0)
+            ).ravel()
+            pct_expressing = np.asarray(
+                (group_expression > 0).mean(axis=0)
+            ).ravel() * 100
+        else:
+            mean_expression = group_expression.mean(axis=0)
+            pct_expressing = (group_expression > 0).mean(axis=0) * 100
+
+        results.append(
+            pd.DataFrame(
+                {
+                    groupby: group,
+                    "gene": available_genes,
+                    "mean_expression": mean_expression,
+                    "pct_expressing": pct_expressing,
+                    "n_cells": int(mask.sum()),
+                }
+            )
+        )
+
+    return pd.concat(results, ignore_index=True)
 
 
 # =============================================================================

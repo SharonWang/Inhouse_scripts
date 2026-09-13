@@ -4,6 +4,32 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-09-13
+
+### Added
+
+- Added `cluster_expression_summary()` to the Python pipeline for long-form
+  cluster- or region-level mean-expression and detection-percentage summaries
+  of requested genes from `adata.X` or a named layer.
+- Documented every input and output field, validation behavior, sparse-matrix
+  handling, grouping and gene ordering, and the interpretation of expression
+  values greater than zero.
+
+### Changed
+
+- Added the new expression-summary utility to the Python public export list,
+  README import example, function index, and usage documentation.
+- Preserved sparse matrices during group-level calculations and kept the input
+  AnnData object unchanged.
+
+### Verification
+
+- Automated tests were not added or run, following the user's standing
+  instruction.
+- Reviewed the function signature, requested-gene filtering, grouping and
+  layer validation, sparse and dense calculation paths, return columns,
+  docstring, README, project log, and Git diff before committing.
+
 ## 2026-09-12
 
 ### Added

@@ -47,6 +47,7 @@ When Python is started from the repository root:
 from Python.scRNAseq_preprocessing import (
     MHCII_GROUP_COLORS,
     WT_CKO_COLORS,
+    cluster_expression_summary,
     convert_genes_to_features,
     ordmag_filter,
     plot_adata_stacked_bar,
@@ -66,6 +67,7 @@ from Python.scRNAseq_preprocessing import (
 | Data loading | `read_one_gsm()` | Reads one GEO 10X matrix and records the original barcode and GSM accession. | `AnnData` object. |
 | Cell calling | `ordmag_filter()` | Applies an approximate Cell Ranger OrdMag Step 1 UMI threshold. | Cell mask, UMI threshold, and per-barcode UMI totals. |
 | Signature scoring | `score_and_assign_two_signatures()` | Scores two gene programs and assigns each cell to the higher-scoring signature. | The annotated input `AnnData` object. |
+| Expression summary | `cluster_expression_summary()` | Calculates mean expression and percentage detected for requested genes within each observed cell or spot group. | Long-form pandas `DataFrame`. |
 | Figure layout | `trim_axs()` | Removes unused Matplotlib axes from a subplot grid. | Flattened array of retained axes. |
 | UMAP visualization | `plot_anndata_group_umap()` | Plots one or more categorical UMAP panels, including split and highlight modes. | Figure and axes array. |
 | Composition visualization | `plot_adata_stacked_bar()` | Calculates and plots cell-composition percentages from `adata.obs`. | Figure and axes; optionally the percentage table. |
@@ -167,6 +169,37 @@ temporary copy so the original matrix is protected. However, centred scaling
 can densify sparse data and require substantial memory; consider
 `zero_center=False` or `scale=False` for large datasets when scientifically
 appropriate.
+
+### Cluster-level expression summaries
+
+#### `cluster_expression_summary(adata, genes, groupby, layer=None)`
+
+Returns mean expression, percentage expressing, and cell or spot count for
+every available requested gene within each observed group. This is especially
+useful for sparse targeted spatial-transcriptomics data, where cluster-level
+summaries are generally more stable than gating individual cells on a single
+marker.
+
+```python
+summary = cluster_expression_summary(
+    adata,
+    genes=["EPCAM", "KRT8", "KRT18"],
+    groupby="leiden",
+    layer="log1p",
+)
+```
+
+The returned long-form table contains the grouping column, `gene`,
+`mean_expression`, `pct_expressing`, and `n_cells`. Gene order follows the
+request, duplicate requests are removed, unavailable genes are ignored, and
+the function raises an error if none are found. Group labels are returned in
+alphabetical order. Sparse matrices remain sparse during subsetting, and the
+input AnnData object is not modified.
+
+`pct_expressing` is defined as the percentage of selected values greater than
+zero. It is therefore most directly interpretable on non-negative count or
+normalized-expression data; on centred or scaled layers it instead represents
+the percentage above that layer's zero point.
 
 ### Visualization
 
