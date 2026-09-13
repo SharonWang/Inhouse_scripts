@@ -322,13 +322,14 @@ functions supplied in R.
 | Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
 | Bulk/pseudobulk structural QC | `check_featurecounts_project()` | Audits ordering, identifier uniqueness, invalid count values, integer-likeness, and assignment-rate summaries. | An invisible structured audit containing overall flags, individual checks, and assignment summary. |
 | Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
+| Bulk/pseudobulk expression preparation | `prepare_bulk_expression()` | Selects samples once, applies a documented edgeR library-normalization method, and calculates reusable log2 CPM values. | A `bulk_expression_prepared` list containing aligned counts, metadata, genes, DGEList, log2 CPM, and normalization settings. |
 | Pairwise differential expression | `edgeR_pairwise()` | Runs comparison-specific filtering, TMM normalization, dispersion estimation, and an edgeR quasi-likelihood test. | Annotated results plus DGEList, fit, test, design, contrast, and sample details. |
 | Pairwise differential expression | `limma_voom_pairwise()` | Runs comparison-specific filtering, TMM normalization, voom weighting, and a limma empirical Bayes test. | Annotated results plus DGEList, voom data, fit, design, contrast, and sample details. |
 | Differential-expression collection | `collect_edgeR_pairwise()` | Combines named edgeR pairwise results with analysis, sorting, contrast, provenance, and signed-significance fields. | One row-bound data frame retaining all result and annotation columns. |
 | Bulk/pseudobulk visualization | `plot_bulk_pca()` | Filters and normalizes sample-level counts, selects variable genes, calculates PCA, and builds a configurable publication-style sample plot. | Plot, PCA fit and scores, log2 CPM, selected genes, variance summaries, DGEList, and palettes. |
 | Bulk/pseudobulk quality-control visualization | `plot_bulk_qc()` | Calculates count-matrix library sizes and plots selected sample-level read, assignment, and library metrics in faceted panels. | Combined patchwork figure, individual metric plots, plotting metadata, and colour mapping. |
-| Bulk/pseudobulk expression visualization | `plot_bulk_violin()` | Calculates TMM-normalized log2 CPM and plots selected gene distributions with optional boxplots, sample points, and split facets. | Plot, long-format expression data, per-panel summaries, gene mapping, log2 CPM, DGEList, and colours. |
-| Gene-program expression heatmap | `plot_gene_set_heatmap()` | Resolves named gene sets, calculates TMM log2 CPM, optionally aggregates samples, and displays genes in ordered program slices. | ComplexHeatmap object, displayed and pre-scaled matrices, log2 CPM, gene mapping, missing genes, aligned metadata, row split, colour function, and DGEList. |
+| Bulk/pseudobulk expression visualization | `plot_bulk_violin()` | Plots selected genes from a reusable prepared normalized-expression object, with optional boxplots, sample points, and split facets. | Plot, long-format expression data, per-panel summaries, gene mapping, log2 CPM, DGEList, normalization settings, and colours. |
+| Gene-program expression heatmap | `plot_gene_set_heatmap()` | Resolves named gene sets from a reusable prepared normalized-expression object, optionally aggregates samples, and displays genes in ordered program slices. | ComplexHeatmap object, displayed and pre-scaled matrices, log2 CPM, gene mapping, missing genes, aligned metadata, row split, colour function, DGEList, and normalization settings. |
 | Differential-expression heatmap | `plot_de_heatmap()` | Selects directional DE genes and displays normalized sample-level expression with optional visualization-only batch correction and marked-gene labels. | ComplexHeatmap object, displayed matrix, corrected expression, selected DE rows, ordered metadata, row split, labels, and colour function. |
 | Differential-expression visualization | `plot_signed_manhattan()` | Displays signed adjusted-p-value significance for every tested gene across comparisons and sorting groups. | Plot, complete plotting data, selected labels, per-panel summary, colours, and cutoff metadata. |
 
@@ -427,6 +428,32 @@ and the function stops if no samples remain. Existing `lib.size` and
 `norm.factors` metadata fields are excluded from DGEList construction so edgeR
 recalculates them from the subset counts; the returned metadata itself is left
 unchanged.
+
+### `prepare_bulk_expression(...)`
+
+Creates one reusable normalized-expression object for downstream descriptive
+bulk or replicate-aware pseudobulk plots. Sample selection happens before
+library normalization, and counts, metadata, annotations, the edgeR object,
+and log2 CPM values remain in explicit matching order.
+
+```r
+bulk <- prepare_bulk_expression(
+  project,
+  subset = Tissue == "Lung",
+  prior_count = 2,
+  norm_method = "TMM"
+)
+
+bulk$logCPM
+bulk$normalization
+```
+
+`norm_method` accepts `"TMM"`, `"TMMwsp"`, `"RLE"`, `"upperquartile"`, or
+`"none"`, using edgeR's library-size normalization. The return records the
+selected method and log-CPM prior count so multiple plots can reuse exactly the
+same sample set and transformation. Raw selected counts are retained; the
+function does not filter genes, construct a statistical design, or perform
+differential-expression testing.
 
 ### Pairwise differential expression
 
@@ -604,14 +631,21 @@ PDF output uses Cairo and other figure formats are saved at 300 dpi.
 
 ### `plot_bulk_violin(...)`
 
-Displays TMM-normalized log2-CPM distributions for requested genes across
-sample groups. Gene symbols and stable IDs are both accepted. If a requested
-symbol resolves to multiple annotation rows, the row with the highest mean
-expression is selected and recorded explicitly.
+Displays prepared log2-CPM distributions for requested genes across sample
+groups. Gene symbols and stable IDs are both accepted. If a requested symbol
+resolves to multiple annotation rows, the row with the highest mean expression
+is selected and recorded explicitly.
 
 ```r
-violin_result <- plot_bulk_violin(
+bulk <- prepare_bulk_expression(
   project,
+  subset = Tissue == "Lung",
+  prior_count = 2,
+  norm_method = "TMM"
+)
+
+violin_result <- plot_bulk_violin(
+  bulk,
   genes = c("GATA1", "SPI1", "CEBPA"),
   group_by = "Condition",
   split_by = "Sorting",
@@ -626,9 +660,9 @@ violin_result$summary
 violin_result$gene_mapping
 ```
 
-The optional `subset` expression is evaluated against sample metadata before
-normalization. Requested gene order is preserved, group and split orders can
-be controlled explicitly, and point jitter is reproducible. Without
+The plot inherits the selected samples and normalization recorded in `bulk`.
+Requested gene order is preserved, group and split orders can be controlled
+explicitly, and point jitter is reproducible. Without
 `split_by`, genes use a wrap layout of at most four columns; with `split_by`,
 genes form facet rows and split values form columns. The automatic height
 adapts to either layout.
@@ -642,9 +676,11 @@ context.
 
 The returned list retains the plot, its complete long-format data, per-gene
 and per-panel descriptive statistics, resolved gene mapping, full normalized
-log2-CPM matrix, normalized edgeR object, and exact colour mapping. Metadata
+log2-CPM matrix, normalized edgeR object, normalization settings, and exact
+colour mapping. Metadata
 columns that conflict with generated plotting fields are preserved with a
-`metadata_` prefix. The function requires edgeR and ggplot2.
+`metadata_` prefix. The plotting function requires ggplot2; preparation
+requires edgeR.
 
 This is a descriptive replicate-level view for raw bulk or replicate-aware
 pseudobulk counts. It does not replace study-design-aware differential
@@ -652,10 +688,10 @@ expression, effect-size estimation, or biological replication checks.
 
 ### `plot_gene_set_heatmap(...)`
 
-Creates a program-oriented expression heatmap directly from a featureCounts
-project and a named list of gene symbols or stable IDs. Gene-set list order and
-gene order are retained by default, and the first gene-set assignment wins when
-multiple sets resolve to the same count-matrix row.
+Creates a program-oriented expression heatmap from a prepared bulk-expression
+object and a named list of gene symbols or stable IDs. Gene-set list order and
+gene order are retained by default, and the first gene-set assignment wins
+when multiple sets resolve to the same expression row.
 
 ```r
 programs <- list(
@@ -663,10 +699,16 @@ programs <- list(
   Myeloid = c("SPI1", "CEBPA", "MPO")
 )
 
-program_heatmap <- plot_gene_set_heatmap(
+bulk <- prepare_bulk_expression(
   project,
-  gene_sets = programs,
   subset = Condition != "Excluded",
+  prior_count = 2,
+  norm_method = "TMM"
+)
+
+program_heatmap <- plot_gene_set_heatmap(
+  bulk,
+  gene_sets = programs,
   aggregate_by = c("Condition", "Sorting"),
   factor_orders = list(
     Condition = c("Control", "Treated")
@@ -680,13 +722,13 @@ program_heatmap$missing_genes
 program_heatmap$matrix
 ```
 
-The function recalculates TMM normalization after optional sample subsetting.
-It can show individual samples or aggregate columns using a scalar summary
-function such as `mean`. Factor levels control reproducible group order, and
-`order_by` can apply a final metadata-based column order. For aggregated
-columns, every metadata field used for annotation or ordering must be constant
-within its aggregate group; ambiguous annotations stop with an explanatory
-error.
+The function inherits the selected samples and normalization recorded in
+`bulk`. It can show individual samples or aggregate columns using a scalar
+summary function such as `mean`. Factor levels control reproducible group
+order, and `order_by` can apply a final metadata-based column order. For
+aggregated columns, every metadata field used for annotation or ordering must
+be constant within its aggregate group; ambiguous annotations stop with an
+explanatory error.
 
 Rows can be standardized and capped before plotting. The default five-colour
 purple mapping follows the actual z-score cap rather than assuming a fixed
@@ -697,9 +739,10 @@ metadata order.
 The returned list retains both displayed and pre-scaled expression matrices,
 the full normalized log2-CPM matrix, resolved and missing genes, aligned column
 metadata, row-slice assignments, colour function, and normalized edgeR object.
+The normalization settings are also returned for provenance.
 The heatmap is descriptive and does not replace design-aware differential
-expression or biological replication checks. Required packages are edgeR,
-ComplexHeatmap, and circlize.
+expression or biological replication checks. The heatmap function requires
+ComplexHeatmap and circlize; preparation requires edgeR.
 
 ### `plot_de_heatmap(...)`
 

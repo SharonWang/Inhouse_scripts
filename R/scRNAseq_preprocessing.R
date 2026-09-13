@@ -1391,6 +1391,233 @@ subset_featurecounts_project <- function(
 
 
 # =============================================================================
+# Shared bulk/pseudobulk expression preparation
+# =============================================================================
+
+
+#' Prepare normalized bulk or pseudobulk expression for reusable plots
+#'
+#' Validate a featureCounts-style project, optionally select samples, calculate
+#' library-composition normalization factors, and produce one aligned log2-CPM
+#' matrix that can be reused by multiple exploratory visualization functions.
+#'
+#' @param dat A list-like featureCounts project containing `counts`, `metadata`,
+#'   and `genes`. `counts` must be a non-empty numeric gene-by-sample matrix or
+#'   Matrix object. Count columns must be identical to metadata row names, and
+#'   count rows must be identical to gene-annotation row names.
+#' @param subset Optional unquoted logical expression evaluated within
+#'   `dat$metadata`, with access to objects in the calling environment. It must
+#'   return one value per sample; missing results are treated as `FALSE`.
+#' @param prior_count Non-negative finite numeric scalar passed to
+#'   [edgeR::cpm()] when calculating log2 counts per million.
+#' @param norm_method One of `"TMM"`, `"TMMwsp"`, `"RLE"`,
+#'   `"upperquartile"`, or `"none"`, passed to
+#'   [edgeR::calcNormFactors()]. `"none"` retains library-size normalization
+#'   while disabling an additional composition-normalization adjustment.
+#' @param verbose Logical scalar. Whether to print the number of genes and
+#'   samples, normalization label, prior count, and edgeR library summary.
+#'
+#' @return An object of class `bulk_expression_prepared`, implemented as a
+#'   named list containing:
+#'   \describe{
+#'     \item{counts}{The original or subsetted raw count matrix.}
+#'     \item{metadata}{Sample metadata aligned to count-matrix columns.}
+#'     \item{genes}{Gene annotation aligned to count-matrix rows.}
+#'     \item{dge}{The normalized [edgeR::DGEList()] object.}
+#'     \item{logCPM}{The normalized gene-by-sample log2-CPM matrix.}
+#'     \item{normalization}{A list containing the normalization `method`,
+#'       `prior_count`, and human-readable `label`.}
+#'   }
+#'
+#' @details
+#' This function centralizes normalization for descriptive bulk RNA-seq and
+#' replicate-aware pseudobulk visualizations. Prepare the subset once and pass
+#' the returned object to [plot_bulk_violin()] or
+#' [plot_gene_set_heatmap()] so both figures use exactly the same samples,
+#' library factors, and prior count. Raw counts are retained unchanged in the
+#' return object. This preparation does not filter genes, construct a design,
+#' or replace design-aware differential-expression analysis. The `edgeR`
+#' package is required.
+#'
+#' @examples
+#' \dontrun{
+#' bulk <- prepare_bulk_expression(
+#'     project,
+#'     subset = Tissue == "Lung",
+#'     prior_count = 2,
+#'     norm_method = "TMM"
+#' )
+#' bulk$logCPM
+#' bulk$normalization
+#' }
+#'
+#' @export
+prepare_bulk_expression <- function(
+    dat,
+    subset = NULL,
+    prior_count = 2,
+    norm_method = c("TMM", "TMMwsp", "RLE", "upperquartile", "none"),
+    verbose = TRUE
+) {
+    if (!requireNamespace("edgeR", quietly = TRUE)) {
+        stop("Package `edgeR` is required.", call. = FALSE)
+    }
+    norm_method <- match.arg(norm_method)
+
+    if (!is.logical(verbose) || length(verbose) != 1L || is.na(verbose)) {
+        stop("`verbose` must be a single TRUE/FALSE value.", call. = FALSE)
+    }
+    if (!is.numeric(prior_count) || length(prior_count) != 1L ||
+        is.na(prior_count) || !is.finite(prior_count) || prior_count < 0) {
+        stop(
+            "`prior_count` must be one finite non-negative number.",
+            call. = FALSE
+        )
+    }
+    if (!is.list(dat)) {
+        stop("`dat` must be a list-like featureCounts project.", call. = FALSE)
+    }
+    required_objects <- c("counts", "metadata", "genes")
+    missing_objects <- setdiff(required_objects, names(dat))
+    if (length(missing_objects) > 0L) {
+        stop(
+            "`dat` is missing: ", paste(missing_objects, collapse = ", "),
+            call. = FALSE
+        )
+    }
+
+    counts <- dat$counts
+    meta <- as.data.frame(dat$metadata)
+    anno <- as.data.frame(dat$genes)
+    if ((!is.matrix(counts) && !inherits(counts, "Matrix")) ||
+        !is.numeric(counts) || nrow(counts) == 0L || ncol(counts) == 0L) {
+        stop(
+            "`dat$counts` must be a non-empty numeric matrix-like object.",
+            call. = FALSE
+        )
+    }
+    if (is.null(rownames(counts)) || is.null(colnames(counts)) ||
+        is.null(rownames(meta)) || is.null(rownames(anno))) {
+        stop(
+            "Counts, metadata, and gene annotations require row/column names.",
+            call. = FALSE
+        )
+    }
+    if (anyDuplicated(rownames(counts)) || anyDuplicated(colnames(counts)) ||
+        anyDuplicated(rownames(meta)) || anyDuplicated(rownames(anno))) {
+        stop("Sample and gene identifiers must be unique.", call. = FALSE)
+    }
+    if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
+        stop(
+            "`dat$counts` must contain finite, non-negative values.",
+            call. = FALSE
+        )
+    }
+    if (!identical(colnames(counts), rownames(meta))) {
+        stop(
+            "colnames(dat$counts) and rownames(dat$metadata) must be ",
+            "identical and in the same order.", call. = FALSE
+        )
+    }
+    if (!identical(rownames(counts), rownames(anno))) {
+        stop(
+            "rownames(dat$counts) and rownames(dat$genes) must be identical ",
+            "and in the same order.", call. = FALSE
+        )
+    }
+
+    subset_expr <- substitute(subset)
+    if (!identical(subset_expr, quote(NULL))) {
+        keep_samples <- eval(
+            subset_expr,
+            envir = meta,
+            enclos = parent.frame()
+        )
+        if (!is.logical(keep_samples) || length(keep_samples) != nrow(meta)) {
+            stop(
+                "`subset` must return one logical value per metadata row.",
+                call. = FALSE
+            )
+        }
+        keep_samples[is.na(keep_samples)] <- FALSE
+        if (!any(keep_samples)) {
+            stop("No samples remain after subsetting.", call. = FALSE)
+        }
+        meta <- meta[keep_samples, , drop = FALSE]
+        counts <- counts[, rownames(meta), drop = FALSE]
+    }
+
+    library_sizes <- colSums(counts)
+    if (any(!is.finite(library_sizes)) || any(library_sizes <= 0)) {
+        stop(
+            "At least one selected sample has library size <= 0.",
+            call. = FALSE
+        )
+    }
+
+    dge <- edgeR::DGEList(counts = counts)
+    dge <- edgeR::calcNormFactors(dge, method = norm_method)
+    logcpm <- edgeR::cpm(
+        dge,
+        log = TRUE,
+        prior.count = prior_count,
+        normalized.lib.sizes = TRUE
+    )
+    if (!identical(colnames(logcpm), rownames(meta)) ||
+        !identical(rownames(logcpm), rownames(anno))) {
+        stop(
+            "Internal error: normalized expression is not aligned with ",
+            "metadata and gene annotations.", call. = FALSE
+        )
+    }
+    if (anyNA(logcpm) || any(!is.finite(logcpm))) {
+        stop(
+            "Internal error: normalized expression contains non-finite values.",
+            call. = FALSE
+        )
+    }
+
+    normalization_label <- if (norm_method == "TMM") {
+        "TMM-normalized log2 CPM"
+    } else if (norm_method == "none") {
+        "library-size-normalized log2 CPM"
+    } else {
+        paste0(norm_method, "-normalized log2 CPM")
+    }
+    result <- list(
+        counts = counts,
+        metadata = meta,
+        genes = anno,
+        dge = dge,
+        logCPM = logcpm,
+        normalization = list(
+            method = norm_method,
+            prior_count = prior_count,
+            label = normalization_label
+        )
+    )
+    class(result) <- c("bulk_expression_prepared", "list")
+
+    if (verbose) {
+        message("")
+        message("========================================")
+        message(" Bulk RNA-seq expression preparation")
+        message("========================================")
+        message("Genes:          ", nrow(logcpm))
+        message("Samples:        ", ncol(logcpm))
+        message("Normalization:  ", normalization_label)
+        message("Prior count:    ", prior_count)
+        message("")
+        message("Library sizes:")
+        print(dge$samples)
+        message("========================================")
+    }
+
+    result
+}
+
+
+# =============================================================================
 # Pairwise differential expression
 # =============================================================================
 
@@ -3494,14 +3721,14 @@ plot_bulk_qc <- function(
 
 #' Plot normalized bulk RNA-seq expression distributions
 #'
-#' Calculate TMM-normalized log2 counts per million for selected genes and
-#' display their sample-level distributions as faceted violin plots. Optional
-#' boxplots and jittered sample points retain distribution summaries and
-#' individual biological-replicate context.
+#' Display selected genes from a prepared normalized-expression object as
+#' faceted sample-level violin plots. Optional boxplots and jittered sample
+#' points retain distribution summaries and individual biological-replicate
+#' context without recalculating normalization for each figure.
 #'
-#' @param dat A list-like featureCounts project containing `counts`, `metadata`,
-#'   and `genes`. Count-matrix columns must be identical to metadata row names,
-#'   and count-matrix rows must be identical to gene-annotation row names.
+#' @param bulk A `bulk_expression_prepared` object returned by
+#'   [prepare_bulk_expression()]. Its `logCPM`, `metadata`, `genes`, and `dge`
+#'   components must remain aligned.
 #' @param genes Non-empty character vector of gene symbols or stable gene IDs.
 #'   Requested order is preserved. Missing genes produce warnings; when one
 #'   request matches multiple annotation rows, the row with the highest mean
@@ -3510,13 +3737,10 @@ plot_bulk_qc <- function(
 #'   x-axis and used for violin colours.
 #' @param split_by `NULL` or a character scalar naming a metadata column used
 #'   for facet columns. Genes form facet rows when this is supplied.
-#' @param subset Optional unquoted logical expression evaluated within
-#'   `dat$metadata`, with access to the calling environment. Missing results
-#'   are treated as `FALSE`.
 #' @param gene_col Character scalar naming the preferred gene-symbol column in
-#'   `dat$genes`. Stable IDs are used when this column is absent or blank.
+#'   `bulk$genes`. Stable IDs are used when this column is absent or blank.
 #' @param gene_id_col Character scalar naming the preferred stable-ID column in
-#'   `dat$genes`. Annotation row names are used when this column is absent.
+#'   `bulk$genes`. Annotation row names are used when this column is absent.
 #' @param group_order `NULL` or a unique character vector defining x-axis group
 #'   order. Observed groups omitted from the vector are appended in first-seen
 #'   order; unobserved supplied values are dropped from the plotted levels.
@@ -3526,8 +3750,6 @@ plot_bulk_qc <- function(
 #'   assigned in plotted group order. Named colours must cover every observed
 #'   group. The default uses `BULK_VIOLIN_MACARON_COLORS` for up to 12 groups
 #'   and a pastel HCL palette for larger sets.
-#' @param prior_count Non-negative numeric scalar passed to [edgeR::cpm()] when
-#'   calculating log2 CPM values.
 #' @param violin_width Positive numeric scalar controlling violin width.
 #' @param violin_alpha Numeric scalar in `[0, 1]` controlling violin opacity.
 #' @param violin_linewidth Non-negative numeric scalar controlling violin
@@ -3574,23 +3796,25 @@ plot_bulk_qc <- function(
 #'       sample count, mean, median, and standard deviation of log2 CPM.}
 #'     \item{gene_mapping}{Resolved requested gene, symbol, stable ID, and
 #'       original count-row mapping.}
-#'     \item{logCPM}{The complete selected-sample TMM-normalized log2-CPM
-#'       matrix before gene selection.}
+#'     \item{logCPM}{The complete prepared log2-CPM matrix before gene
+#'       selection.}
 #'     \item{dge}{The normalized [edgeR::DGEList()] object.}
 #'     \item{colors}{The named group-colour mapping used by the plot.}
+#'     \item{normalization}{The normalization settings inherited from `bulk`.}
 #'   }
 #'
 #' @details
-#' This function expects raw sample-level bulk RNA-seq counts or
-#' replicate-aware pseudobulk counts. TMM normalization is recalculated after
-#' optional sample subsetting. The plot is descriptive and does not replace a
-#' design-aware differential-expression model, effect estimates, or biological
-#' replication checks. Required packages are `edgeR` and `ggplot2`.
+#' Prepare raw sample-level bulk RNA-seq or replicate-aware pseudobulk counts
+#' with [prepare_bulk_expression()] before plotting. The plot is descriptive
+#' and does not replace a design-aware differential-expression model, effect
+#' estimates, or biological replication checks. The input object is not
+#' modified. The `ggplot2` package is required.
 #'
 #' @examples
 #' \dontrun{
+#' bulk <- prepare_bulk_expression(project, subset = Tissue == "Lung")
 #' violin_result <- plot_bulk_violin(
-#'     project,
+#'     bulk,
 #'     genes = c("GATA1", "SPI1", "CEBPA"),
 #'     group_by = "Condition",
 #'     split_by = "Sorting",
@@ -3604,17 +3828,15 @@ plot_bulk_qc <- function(
 #'
 #' @export
 plot_bulk_violin <- function(
-    dat,
+    bulk,
     genes,
     group_by = "Sorting",
     split_by = NULL,
-    subset = NULL,
     gene_col = "gene_name",
     gene_id_col = "gene_id",
     group_order = NULL,
     split_order = NULL,
     colors = NULL,
-    prior_count = 2,
     violin_width = 0.85,
     violin_alpha = 0.65,
     violin_linewidth = 0.45,
@@ -3639,7 +3861,7 @@ plot_bulk_violin <- function(
     verbose = TRUE
 ) {
     violin_scale <- match.arg(violin_scale)
-    required_packages <- c("edgeR", "ggplot2")
+    required_packages <- "ggplot2"
     missing_packages <- required_packages[!vapply(
         required_packages,
         requireNamespace,
@@ -3654,51 +3876,59 @@ plot_bulk_violin <- function(
         )
     }
 
-    required_objects <- c("counts", "metadata", "genes")
-    if (!is.list(dat)) {
-        stop("`dat` must be a list-like featureCounts project.", call. = FALSE)
+    required_objects <- c("logCPM", "metadata", "genes", "dge")
+    if (!is.list(bulk)) {
+        stop(
+            "`bulk` must be the output of prepare_bulk_expression().",
+            call. = FALSE
+        )
     }
-    missing_objects <- setdiff(required_objects, names(dat))
+    missing_objects <- setdiff(required_objects, names(bulk))
     if (length(missing_objects) > 0L) {
         stop(
-            "`dat` is missing: ", paste(missing_objects, collapse = ", "),
+            "`bulk` is missing: ", paste(missing_objects, collapse = ", "),
+            ". Run prepare_bulk_expression() first.",
             call. = FALSE
         )
     }
 
-    counts <- dat$counts
-    meta <- dat$metadata
-    anno <- dat$genes
-    if ((!is.matrix(counts) && !inherits(counts, "Matrix")) ||
-        !is.numeric(counts)) {
-        stop("`dat$counts` must be a numeric matrix-like object.", call. = FALSE)
+    logcpm <- bulk$logCPM
+    meta <- as.data.frame(bulk$metadata)
+    anno <- as.data.frame(bulk$genes)
+    dge <- bulk$dge
+    normalization_label <- if (!is.null(bulk$normalization$label)) {
+        bulk$normalization$label
+    } else {
+        "precomputed log2 CPM"
     }
-    if (!is.data.frame(meta) || !is.data.frame(anno)) {
-        stop("`dat$metadata` and `dat$genes` must be data frames.", call. = FALSE)
-    }
-    if (is.null(colnames(counts)) || is.null(rownames(counts)) ||
-        is.null(rownames(meta)) || is.null(rownames(anno))) {
-        stop("Counts, metadata, and gene annotations require row/column names.",
+    if ((!is.matrix(logcpm) && !inherits(logcpm, "Matrix")) ||
+        !is.numeric(logcpm) || nrow(logcpm) == 0L || ncol(logcpm) == 0L) {
+        stop("`bulk$logCPM` must be a non-empty numeric matrix-like object.",
              call. = FALSE)
     }
-    if (anyDuplicated(colnames(counts)) || anyDuplicated(rownames(counts)) ||
+    if (is.null(colnames(logcpm)) || is.null(rownames(logcpm)) ||
+        is.null(rownames(meta)) || is.null(rownames(anno))) {
+        stop("Expression, metadata, and annotations require row/column names.",
+             call. = FALSE)
+    }
+    if (anyDuplicated(colnames(logcpm)) || anyDuplicated(rownames(logcpm)) ||
         anyDuplicated(rownames(meta)) || anyDuplicated(rownames(anno))) {
         stop("Sample and gene row identifiers must be unique.", call. = FALSE)
     }
-    if (!identical(colnames(counts), rownames(meta))) {
+    if (!identical(colnames(logcpm), rownames(meta))) {
         stop(
-            "colnames(dat$counts) and rownames(dat$metadata) must be identical ",
+            "colnames(bulk$logCPM) and rownames(bulk$metadata) must be ",
+            "identical and in the same order.", call. = FALSE
+        )
+    }
+    if (!identical(rownames(logcpm), rownames(anno))) {
+        stop(
+            "rownames(bulk$logCPM) and rownames(bulk$genes) must be identical ",
             "and in the same order.", call. = FALSE
         )
     }
-    if (!identical(rownames(counts), rownames(anno))) {
-        stop(
-            "rownames(dat$counts) and rownames(dat$genes) must be identical ",
-            "and in the same order.", call. = FALSE
-        )
-    }
-    if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
-        stop("`dat$counts` must contain finite, non-negative values.",
+    if (anyNA(logcpm) || any(!is.finite(logcpm))) {
+        stop("`bulk$logCPM` must contain finite values.",
              call. = FALSE)
     }
 
@@ -3718,11 +3948,11 @@ plot_bulk_violin <- function(
              call. = FALSE)
     }
     if (!group_by %in% colnames(meta)) {
-        stop("`group_by = \"", group_by, "\"` was not found in dat$metadata.",
+        stop("`group_by = \"", group_by, "\"` was not found in bulk$metadata.",
              call. = FALSE)
     }
     if (!is.null(split_by) && !split_by %in% colnames(meta)) {
-        stop("`split_by = \"", split_by, "\"` was not found in dat$metadata.",
+        stop("`split_by = \"", split_by, "\"` was not found in bulk$metadata.",
              call. = FALSE)
     }
     if (!is.null(split_by) && identical(group_by, split_by)) {
@@ -3750,7 +3980,6 @@ plot_bulk_violin <- function(
     }
 
     numeric_arguments <- list(
-        prior_count = prior_count,
         violin_width = violin_width,
         violin_alpha = violin_alpha,
         violin_linewidth = violin_linewidth,
@@ -3774,7 +4003,7 @@ plot_bulk_violin <- function(
             paste(invalid_numeric, collapse = ", "), call. = FALSE
         )
     }
-    if (prior_count < 0 || violin_width <= 0 || violin_linewidth < 0 ||
+    if (violin_width <= 0 || violin_linewidth < 0 ||
         box_width <= 0 || box_linewidth < 0 || point_size <= 0 ||
         jitter_width < 0 || width <= 0 ||
         violin_alpha < 0 || violin_alpha > 1 ||
@@ -3811,23 +4040,6 @@ plot_bulk_violin <- function(
         }
     }
 
-    subset_expr <- substitute(subset)
-    if (!identical(subset_expr, quote(NULL))) {
-        keep_samples <- eval(subset_expr, envir = meta, enclos = parent.frame())
-        if (!is.logical(keep_samples) || length(keep_samples) != nrow(meta)) {
-            stop(
-                "`subset` must evaluate to one TRUE/FALSE value for every ",
-                "metadata row.", call. = FALSE
-            )
-        }
-        keep_samples[is.na(keep_samples)] <- FALSE
-        if (!any(keep_samples)) {
-            stop("`subset` retained zero samples.", call. = FALSE)
-        }
-        meta <- meta[keep_samples, , drop = FALSE]
-        counts <- counts[, rownames(meta), drop = FALSE]
-    }
-
     group_values <- as.character(meta[[group_by]])
     if (anyNA(group_values) || any(!nzchar(group_values))) {
         stop("The selected `group_by` column contains missing or empty values.",
@@ -3840,20 +4052,6 @@ plot_bulk_violin <- function(
                  call. = FALSE)
         }
     }
-
-    library_sizes <- colSums(counts)
-    if (any(!is.finite(library_sizes)) || any(library_sizes <= 0)) {
-        stop("At least one selected sample has library size <= 0.", call. = FALSE)
-    }
-
-    dge <- edgeR::DGEList(counts = counts)
-    dge <- edgeR::calcNormFactors(dge, method = "TMM")
-    logcpm <- edgeR::cpm(
-        dge,
-        log = TRUE,
-        prior.count = prior_count,
-        normalized.lib.sizes = TRUE
-    )
 
     anno$.GeneID_internal <- if (gene_id_col %in% colnames(anno)) {
         as.character(anno[[gene_id_col]])
@@ -4161,7 +4359,7 @@ plot_bulk_violin <- function(
             message("Split by: ", split_by)
         }
         message("Violin scale: ", violin_scale)
-        message("TMM normalization + log2 CPM")
+        message("Normalization: ", normalization_label)
         message("")
         message("Gene mapping:")
         print(gene_mapping)
@@ -4178,6 +4376,7 @@ plot_bulk_violin <- function(
         gene_mapping = gene_mapping,
         logCPM = logcpm,
         dge = dge,
+        normalization = bulk$normalization,
         colors = colors
     )
 }
@@ -4185,25 +4384,20 @@ plot_bulk_violin <- function(
 
 #' Plot expression programs as a gene-set heatmap
 #'
-#' Resolve ordered gene sets against a featureCounts-style project, calculate
-#' TMM-normalized log2 counts per million, optionally aggregate samples by
-#' metadata combinations, and display the selected genes in named row slices.
+#' Resolve ordered gene sets against a prepared bulk-expression object,
+#' optionally aggregate samples by metadata combinations, and display the
+#' selected genes in named row slices.
 #'
-#' @param dat A list-like featureCounts project containing `counts`, `metadata`,
-#'   and `genes`. Count columns must match metadata row names exactly and count
-#'   rows must match gene-annotation row names exactly.
+#' @param bulk A `bulk_expression_prepared` object returned by
+#'   [prepare_bulk_expression()]. Its `logCPM`, `metadata`, `genes`, and `dge`
+#'   components must retain identical sample and gene ordering.
 #' @param gene_sets Named non-empty list of character vectors containing gene
 #'   symbols or stable IDs. List order defines row-slice order. When the same
 #'   expression row appears in multiple sets, its first set assignment wins.
 #' @param gene_col Character scalar naming the preferred gene-symbol column in
-#'   `dat$genes`. Stable IDs are used when this column is absent or blank.
+#'   `bulk$genes`. Stable IDs are used when this column is absent or blank.
 #' @param gene_id_col Character scalar naming the preferred stable-ID column in
-#'   `dat$genes`. Annotation row names are used when this column is absent.
-#' @param subset Optional unquoted logical expression evaluated within
-#'   `dat$metadata`, with access to the calling environment. Missing results
-#'   are treated as `FALSE`.
-#' @param prior_count Non-negative numeric scalar passed to [edgeR::cpm()] when
-#'   calculating log2 CPM values.
+#'   `bulk$genes`. Annotation row names are used when this column is absent.
 #' @param aggregate_by `NULL` or a unique character vector naming metadata
 #'   columns whose combinations define aggregated heatmap columns.
 #' @param aggregate_fun Function used to combine replicate expression values
@@ -4283,10 +4477,10 @@ plot_bulk_violin <- function(
 #'     \item{heatmap}{The assembled `ComplexHeatmap::Heatmap` object.}
 #'     \item{matrix}{The displayed matrix after optional aggregation, row
 #'       standardization, and capping.}
-#'     \item{expression}{The selected TMM log2-CPM matrix after optional
+#'     \item{expression}{The selected prepared log2-CPM matrix after optional
 #'       aggregation and before row standardization.}
-#'     \item{logCPM}{The complete selected-sample TMM-normalized log2-CPM
-#'       matrix before gene selection.}
+#'     \item{logCPM}{The complete prepared log2-CPM matrix before gene
+#'       selection.}
 #'     \item{gene_mapping}{Requested set, requested gene, resolved symbol,
 #'       stable ID, source count row, and unique display name for every plotted
 #'       gene.}
@@ -4295,17 +4489,21 @@ plot_bulk_violin <- function(
 #'     \item{metadata}{Metadata aligned to displayed heatmap columns.}
 #'     \item{row_split}{Gene-set factor aligned to displayed matrix rows.}
 #'     \item{col_fun}{The colour-mapping function used by the heatmap.}
-#'     \item{dge}{The selected-sample TMM-normalized [edgeR::DGEList()] object.}
+#'     \item{dge}{The prepared [edgeR::DGEList()] object.}
+#'     \item{normalization}{The normalization settings inherited from `bulk`.}
 #'   }
 #'
 #' @details
-#' This function expects raw sample-level bulk RNA-seq counts or
-#' replicate-aware pseudobulk counts. When aggregation is requested, any
+#' Prepare raw sample-level bulk RNA-seq counts or replicate-aware pseudobulk
+#' counts with [prepare_bulk_expression()] before calling this function. This
+#' keeps normalization and sample selection consistent across reusable plots.
+#' When aggregation is requested, any
 #' metadata fields used for ordering or annotation must be constant within
 #' every aggregate group; otherwise the function stops rather than displaying
 #' a misleading annotation. This heatmap is descriptive and does not replace
 #' design-aware differential-expression analysis or biological replication
-#' checks. Required packages are `edgeR`, `ComplexHeatmap`, and `circlize`.
+#' checks. The supplied object is not modified. Required packages are
+#' `ComplexHeatmap` and `circlize`.
 #'
 #' @examples
 #' \dontrun{
@@ -4313,10 +4511,13 @@ plot_bulk_violin <- function(
 #'     Stemness = c("GATA2", "KIT", "PROM1"),
 #'     Myeloid = c("SPI1", "CEBPA", "MPO")
 #' )
-#' program_heatmap <- plot_gene_set_heatmap(
+#' bulk <- prepare_bulk_expression(
 #'     project,
+#'     subset = Condition != "Excluded"
+#' )
+#' program_heatmap <- plot_gene_set_heatmap(
+#'     bulk,
 #'     gene_sets = programs,
-#'     subset = Condition != "Excluded",
 #'     aggregate_by = c("Condition", "Sorting"),
 #'     factor_orders = list(Condition = c("Control", "Treated")),
 #'     annotation_cols = c("Condition", "Sorting"),
@@ -4328,12 +4529,10 @@ plot_bulk_violin <- function(
 #'
 #' @export
 plot_gene_set_heatmap <- function(
-    dat,
+    bulk,
     gene_sets,
     gene_col = "gene_name",
     gene_id_col = "gene_id",
-    subset = NULL,
-    prior_count = 2,
     aggregate_by = NULL,
     aggregate_fun = mean,
     factor_orders = NULL,
@@ -4374,7 +4573,7 @@ plot_gene_set_heatmap <- function(
     draw_plot = TRUE,
     verbose = TRUE
 ) {
-    required_packages <- c("edgeR", "ComplexHeatmap", "circlize")
+    required_packages <- c("ComplexHeatmap", "circlize")
     missing_packages <- required_packages[!vapply(
         required_packages,
         requireNamespace,
@@ -4443,7 +4642,6 @@ plot_gene_set_heatmap <- function(
         )
     }
     numeric_arguments <- list(
-        prior_count = prior_count,
         row_names_fontsize = row_names_fontsize,
         row_title_fontsize = row_title_fontsize,
         row_gap_mm = row_gap_mm,
@@ -4464,10 +4662,10 @@ plot_gene_set_heatmap <- function(
             paste(invalid_numeric, collapse = ", "), call. = FALSE
         )
     }
-    if (prior_count < 0 || row_names_fontsize <= 0 ||
+    if (row_names_fontsize <= 0 ||
         row_title_fontsize <= 0 || row_gap_mm < 0 ||
         column_names_fontsize <= 0 || cell_border_lwd < 0 || width <= 0) {
-        stop("Normalization and display values are outside allowed ranges.",
+        stop("Display values are outside allowed ranges.",
              call. = FALSE)
     }
     if (!is.null(height) && (!is.numeric(height) || length(height) != 1L ||
@@ -4479,43 +4677,54 @@ plot_gene_set_heatmap <- function(
         stop("`z_cap` must be NULL or a positive numeric scalar.", call. = FALSE)
     }
 
-    if (!is.list(dat)) {
-        stop("`dat` must be a list-like featureCounts project.", call. = FALSE)
-    }
-    required_objects <- c("counts", "metadata", "genes")
-    missing_objects <- setdiff(required_objects, names(dat))
-    if (length(missing_objects) > 0L) {
+    if (!is.list(bulk)) {
         stop(
-            "`dat` is missing: ", paste(missing_objects, collapse = ", "),
+            "`bulk` must be the output of prepare_bulk_expression().",
             call. = FALSE
         )
     }
-    counts <- dat$counts
-    meta <- as.data.frame(dat$metadata)
-    anno <- as.data.frame(dat$genes)
-    if ((!is.matrix(counts) && !inherits(counts, "Matrix")) ||
-        !is.numeric(counts) || nrow(counts) == 0L || ncol(counts) == 0L) {
-        stop("`dat$counts` must be a non-empty numeric matrix-like object.",
+    required_objects <- c("logCPM", "metadata", "genes", "dge")
+    missing_objects <- setdiff(required_objects, names(bulk))
+    if (length(missing_objects) > 0L) {
+        stop(
+            "`bulk` is missing: ", paste(missing_objects, collapse = ", "),
+            ". Run prepare_bulk_expression() first.",
+            call. = FALSE
+        )
+    }
+    logcpm <- bulk$logCPM
+    meta <- as.data.frame(bulk$metadata)
+    anno <- as.data.frame(bulk$genes)
+    dge <- bulk$dge
+    normalization_label <- if (!is.null(bulk$normalization$label)) {
+        bulk$normalization$label
+    } else {
+        "precomputed log2 CPM"
+    }
+    if ((!is.matrix(logcpm) && !inherits(logcpm, "Matrix")) ||
+        !is.numeric(logcpm) || nrow(logcpm) == 0L || ncol(logcpm) == 0L) {
+        stop("`bulk$logCPM` must be a non-empty numeric matrix-like object.",
              call. = FALSE)
     }
-    if (is.null(rownames(counts)) || is.null(colnames(counts)) ||
+    if (is.null(rownames(logcpm)) || is.null(colnames(logcpm)) ||
         is.null(rownames(meta)) || is.null(rownames(anno))) {
-        stop("Counts, metadata, and annotations require row and column names.",
+        stop("Expression, metadata, and annotations require row/column names.",
              call. = FALSE)
     }
-    if (anyDuplicated(rownames(counts)) || anyDuplicated(colnames(counts)) ||
+    if (anyDuplicated(rownames(logcpm)) || anyDuplicated(colnames(logcpm)) ||
         anyDuplicated(rownames(meta)) || anyDuplicated(rownames(anno))) {
         stop("Sample and gene identifiers must be unique.", call. = FALSE)
     }
-    if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
-        stop("`dat$counts` must contain finite non-negative values.",
+    if (anyNA(logcpm) || any(!is.finite(logcpm))) {
+        stop("`bulk$logCPM` must contain finite values.",
              call. = FALSE)
     }
-    if (!identical(colnames(counts), rownames(meta))) {
-        stop("Count columns and metadata rows are not aligned.", call. = FALSE)
+    if (!identical(colnames(logcpm), rownames(meta))) {
+        stop("Expression columns and metadata rows are not aligned.",
+             call. = FALSE)
     }
-    if (!identical(rownames(counts), rownames(anno))) {
-        stop("Count rows and gene annotation rows are not aligned.",
+    if (!identical(rownames(logcpm), rownames(anno))) {
+        stop("Expression rows and gene annotation rows are not aligned.",
              call. = FALSE)
     }
 
@@ -4535,21 +4744,6 @@ plot_gene_set_heatmap <- function(
             "Gene sets cannot be empty after cleaning: ",
             paste(empty_sets, collapse = ", "), call. = FALSE
         )
-    }
-
-    subset_expr <- substitute(subset)
-    if (!identical(subset_expr, quote(NULL))) {
-        keep_samples <- eval(subset_expr, envir = meta, enclos = parent.frame())
-        if (!is.logical(keep_samples) || length(keep_samples) != nrow(meta)) {
-            stop("`subset` must return one logical value per sample.",
-                 call. = FALSE)
-        }
-        keep_samples[is.na(keep_samples)] <- FALSE
-        if (!any(keep_samples)) {
-            stop("No samples remain after subsetting.", call. = FALSE)
-        }
-        meta <- meta[keep_samples, , drop = FALSE]
-        counts <- counts[, rownames(meta), drop = FALSE]
     }
 
     if (!is.null(factor_orders)) {
@@ -4587,20 +4781,6 @@ plot_gene_set_heatmap <- function(
             )
         }
     }
-
-    library_sizes <- colSums(counts)
-    if (any(!is.finite(library_sizes)) || any(library_sizes <= 0)) {
-        stop("At least one selected sample has library size <= 0.",
-             call. = FALSE)
-    }
-    dge <- edgeR::DGEList(counts = counts)
-    dge <- edgeR::calcNormFactors(dge, method = "TMM")
-    logcpm <- edgeR::cpm(
-        dge,
-        log = TRUE,
-        prior.count = prior_count,
-        normalized.lib.sizes = TRUE
-    )
 
     anno$.GeneID <- if (gene_id_col %in% colnames(anno)) {
         as.character(anno[[gene_id_col]])
@@ -4953,7 +5133,7 @@ plot_gene_set_heatmap <- function(
         } else {
             message("Aggregated by:       ", paste(aggregate_by, collapse = " + "))
         }
-        message("Normalization:        TMM log2 CPM")
+        message("Normalization:        ", normalization_label)
         if (row_zscore) {
             message("Scaling:             row z-score")
             message(
@@ -4982,7 +5162,8 @@ plot_gene_set_heatmap <- function(
         metadata = column_metadata,
         row_split = row_split,
         col_fun = col_fun,
-        dge = dge
+        dge = dge,
+        normalization = bulk$normalization
     ))
 }
 

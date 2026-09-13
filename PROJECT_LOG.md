@@ -8,6 +8,13 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `prepare_bulk_expression()` as the shared R bulk/pseudobulk
+  sample-selection and normalization layer, returning aligned selected counts,
+  metadata, gene annotations, an edgeR object, log2 CPM, and explicit
+  normalization provenance.
+- Documented all preparation inputs and outputs, supported edgeR normalization
+  methods, sample-selection behavior, ordering guarantees, and analytical
+  scope in Roxygen and the README.
 - Added `cluster_expression_summary()` to the Python pipeline for long-form
   cluster- or region-level mean-expression and detection-percentage summaries
   of requested genes from `adata.X` or a named layer.
@@ -17,6 +24,13 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Refactored `plot_bulk_violin()` and `plot_gene_set_heatmap()` to accept the
+  reusable object from `prepare_bulk_expression()` so the same selected sample
+  set and normalization settings can be shared across figures without
+  recalculation.
+- Updated both plot functions' validation, verbose summaries, returned
+  provenance, Roxygen examples, README function index, and usage examples for
+  the two-step preparation-and-visualization workflow.
 - Added the new expression-summary utility to the Python public export list,
   README import example, function index, and usage documentation.
 - Preserved sparse matrices during group-level calculations and kept the input
@@ -24,6 +38,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Verification
 
+- Statically reviewed the three R function signatures, Roxygen input and output
+  documentation, prepared-object alignment checks, retained visualization
+  safeguards, README examples, project log, and Git diff.
 - Automated tests were not added or run, following the user's standing
   instruction.
 - Reviewed the function signature, requested-gene filtering, grouping and
