@@ -19,6 +19,14 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added `quick_umap()` to fit and retain a reusable umap-learn model from
+  reference PCA coordinates while storing the reference embedding in AnnData.
+- Added `quick_umap_proj()` to project query observations through a fitted
+  reference UMAP model after validating PCA dimensional compatibility.
+- Added `wilcoxon_am1_vs_am2()` for bidirectional exploratory Scanpy Wilcoxon
+  comparisons, complete result extraction, and configurable marker filtering.
+- Added complete Python docstrings for every new input, output, side effect,
+  validation error, usage example, and scientific interpretation constraint.
 - Added 16 R bulk RNA-seq functions covering TF activity inference and testing,
   TF and gene heatmaps, gene-DE collection, enrichment, overall condition
   response, paired expression, signaling-expression preparation, NicheNet
@@ -33,6 +41,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Updated the Python public export list and README function index, dependency
+  notes, examples, return contracts, and reference-projection and cell-level
+  differential-expression cautions for the three new functions.
 - Updated `plot_gene_set_heatmap()` and `plot_de_heatmap()` with the supplied
   explicit PDF filename handling.
 - Replaced embedded supplied colour vectors with named reusable constants while
@@ -48,6 +59,9 @@ preprocessing pipelines. All project files are maintained under
 
 - Automated runtime tests were not run, following the user's standing
   instruction.
+- Statically checked the three new Python definitions, public exports,
+  docstring coverage, README entries, function-name uniqueness, whitespace,
+  Git scope, working-tree diff, and final staged diff before committing.
 - Statically reviewed function-name uniqueness, candidate-versus-repository
   differences, Roxygen coverage, README coverage, whitespace, Git scope, and
   the final staged diff before committing.

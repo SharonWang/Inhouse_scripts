@@ -8,7 +8,7 @@ complete docstring describing their inputs, outputs, side effects, and errors.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,8 +36,11 @@ __all__ = [
     "plot_anndata_group_umap",
     "plot_seurat_violins",
     "read_one_gsm",
+    "quick_umap",
+    "quick_umap_proj",
     "score_and_assign_two_signatures",
     "trim_axs",
+    "wilcoxon_am1_vs_am2",
 ]
 
 
@@ -874,6 +877,573 @@ def cluster_expression_summary(
         )
 
     return pd.concat(results, ignore_index=True)
+
+
+# =============================================================================
+# Dimensionality reduction and reference projection
+# =============================================================================
+
+
+def quick_umap(
+    adata_ref: AnnData,
+    n_neighbors: int = 10,
+    min_dist: float = 0.5,
+    spread: float = 1.0,
+    n_components: int = 2,
+    alpha: float = 1.0,
+    a: float | None = None,
+    b: float | None = None,
+    negative_sample_rate: int = 5,
+    init_coords: Any = "spectral",
+    random_state: int | None = 0,
+    **kwargs: Any,
+) -> Any:
+    """Fit a UMAP model to reference PCA coordinates and store its embedding.
+
+    The fitted ``umap-learn`` model can subsequently project observations whose
+    PCA coordinates are expressed in the same reference PCA feature space by
+    passing it to :func:`quick_umap_proj`. Scanpy neighbour metadata is used to
+    recover the high-dimensional distance metric, but the stored Scanpy graph
+    itself is not supplied to ``umap-learn``.
+
+    Parameters
+    ----------
+    adata_ref : anndata.AnnData
+        Reference object containing PCA coordinates in
+        ``adata_ref.obsm["X_pca"]`` and Scanpy neighbour metadata in
+        ``adata_ref.uns["neighbors"]``. The object is modified in place only
+        by writing the fitted coordinates to ``adata_ref.obsm["X_umap"]``.
+    n_neighbors : int, default=10
+        Size of the local neighbourhood used by ``umap.UMAP``. Must be an
+        integer of at least two.
+    min_dist : float, default=0.5
+        Minimum distance between embedded points. Must be non-negative and no
+        greater than ``spread``.
+    spread : float, default=1.0
+        Effective scale of embedded points. Must be positive and at least
+        ``min_dist``.
+    n_components : int, default=2
+        Number of UMAP dimensions to calculate. Must be a positive integer.
+    alpha : float, default=1.0
+        Initial learning rate passed to ``umap.UMAP`` as ``learning_rate``.
+        Must be positive.
+    a : float, optional
+        First UMAP distance-curve parameter. Supply together with ``b``. When
+        both are omitted, they are calculated from ``spread`` and
+        ``min_dist`` with :func:`umap.umap_.find_ab_params`.
+    b : float, optional
+        Second UMAP distance-curve parameter. Supply together with ``a``.
+    negative_sample_rate : int, default=5
+        Number of negative samples per positive edge during optimization.
+        Must be a positive integer.
+    init_coords : str or array-like, default="spectral"
+        Initialization passed to the UMAP ``init`` argument, such as
+        ``"spectral"``, ``"random"``, or an initial coordinate array.
+    random_state : int, optional, default=0
+        Random seed passed to ``umap.UMAP``. Use ``None`` for unseeded fitting.
+    **kwargs
+        Additional keyword arguments forwarded unchanged to ``umap.UMAP``.
+        They must not duplicate arguments explicitly supplied by this
+        function. ``densmap=True``, a ``transform_mode`` other than
+        ``"embedding"``, and ``precomputed_knn`` are rejected because they can
+        violate the fitted embedding and projection contract of these helpers.
+
+    Returns
+    -------
+    umap.umap_.UMAP
+        Fitted UMAP estimator. Its ``embedding_`` is copied to
+        ``adata_ref.obsm["X_umap"]`` and its ``transform`` method can be used
+        for reference projection.
+
+    Raises
+    ------
+    KeyError
+        If ``X_pca`` or Scanpy neighbour metadata is absent.
+    TypeError
+        If an integer-valued parameter has the wrong type or the stored
+        neighbour parameters are not mappings.
+    ValueError
+        If a numerical parameter is invalid, only one of ``a`` and ``b`` is
+        supplied, or the PCA matrix is empty, non-two-dimensional, or contains
+        non-finite values; also raised for a precomputed-distance metric or an
+        incompatible UMAP fitting mode.
+    ImportError
+        If ``umap-learn`` is not installed in the active environment.
+
+    Examples
+    --------
+    >>> model = quick_umap(adata_ref, n_neighbors=15, min_dist=0.3)
+    >>> adata_ref.obsm["X_umap"].shape
+    (adata_ref.n_obs, 2)
+
+    Notes
+    -----
+    This function fits UMAP directly from ``X_pca``. It does not reproduce a
+    Scanpy UMAP that was optimized from a precomputed connectivity graph.
+    Keep the fitted model together with the PCA transformation and preprocessing
+    provenance needed to place new data in the identical PCA feature space.
+    """
+    try:
+        import umap.umap_ as umap_module
+    except ImportError as exc:
+        raise ImportError(
+            "quick_umap requires umap-learn; install it in the analysis "
+            "environment before calling this function"
+        ) from exc
+
+    if "X_pca" not in adata_ref.obsm:
+        raise KeyError('adata_ref.obsm must contain "X_pca"')
+    if "neighbors" not in adata_ref.uns:
+        raise KeyError('adata_ref.uns must contain "neighbors"')
+
+    integer_parameters = {
+        "n_neighbors": n_neighbors,
+        "n_components": n_components,
+        "negative_sample_rate": negative_sample_rate,
+    }
+    for parameter_name, parameter_value in integer_parameters.items():
+        if isinstance(parameter_value, bool) or not isinstance(
+            parameter_value, Integral
+        ):
+            raise TypeError(f"{parameter_name} must be an integer")
+    if n_neighbors < 2:
+        raise ValueError("n_neighbors must be at least two")
+    if n_components <= 0:
+        raise ValueError("n_components must be greater than zero")
+    if negative_sample_rate <= 0:
+        raise ValueError("negative_sample_rate must be greater than zero")
+    if isinstance(random_state, bool) or (
+        random_state is not None and not isinstance(random_state, Integral)
+    ):
+        raise TypeError("random_state must be an integer or None")
+
+    numerical_parameters = {
+        "min_dist": min_dist,
+        "spread": spread,
+        "alpha": alpha,
+    }
+    numerical_values: dict[str, float] = {}
+    for parameter_name, parameter_value in numerical_parameters.items():
+        try:
+            numerical_values[parameter_name] = float(parameter_value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{parameter_name} must be numeric") from exc
+        if not np.isfinite(numerical_values[parameter_name]):
+            raise ValueError(f"{parameter_name} must be finite")
+
+    min_dist = numerical_values["min_dist"]
+    spread = numerical_values["spread"]
+    alpha = numerical_values["alpha"]
+    if min_dist < 0:
+        raise ValueError("min_dist must be non-negative")
+    if spread <= 0:
+        raise ValueError("spread must be greater than zero")
+    if min_dist > spread:
+        raise ValueError("min_dist must be less than or equal to spread")
+    if alpha <= 0:
+        raise ValueError("alpha must be greater than zero")
+
+    if (a is None) != (b is None):
+        raise ValueError("a and b must either both be supplied or both be None")
+    if a is None and b is None:
+        a, b = umap_module.find_ab_params(spread=spread, min_dist=min_dist)
+    else:
+        try:
+            a = float(a)
+            b = float(b)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("a and b must be numeric when supplied") from exc
+        if not np.isfinite(a) or not np.isfinite(b) or a <= 0 or b <= 0:
+            raise ValueError("a and b must be finite positive values")
+
+    neighbor_metadata = adata_ref.uns["neighbors"]
+    if not isinstance(neighbor_metadata, Mapping):
+        raise TypeError('adata_ref.uns["neighbors"] must be a mapping')
+    neighbor_params = neighbor_metadata.get("params", {})
+    if not isinstance(neighbor_params, Mapping):
+        raise TypeError('adata_ref.uns["neighbors"]["params"] must be a mapping')
+    metric = neighbor_params.get("metric", "euclidean")
+    metric_kwds = neighbor_params.get("metric_kwds", {}) or {}
+    if not isinstance(metric_kwds, Mapping):
+        raise TypeError("stored neighbor metric_kwds must be a mapping")
+    if metric == "precomputed":
+        raise ValueError(
+            'quick_umap cannot reuse metric="precomputed" with PCA coordinates'
+        )
+
+    # These umap-learn modes do not produce a reusable coordinate transformer.
+    transform_mode = kwargs.get("transform_mode", "embedding")
+    if transform_mode != "embedding":
+        raise ValueError('transform_mode must be "embedding" for projection')
+    if kwargs.get("densmap", False):
+        raise ValueError("densmap=True is incompatible with UMAP projection")
+    if kwargs.get("precomputed_knn") is not None:
+        raise ValueError(
+            "precomputed_knn is not supported by this reusable projection helper"
+        )
+
+    pca_coordinates = np.ascontiguousarray(
+        adata_ref.obsm["X_pca"],
+        dtype=np.float32,
+    )
+    if pca_coordinates.ndim != 2:
+        raise ValueError('adata_ref.obsm["X_pca"] must be two-dimensional')
+    if pca_coordinates.shape[0] < 2 or pca_coordinates.shape[1] == 0:
+        raise ValueError('adata_ref.obsm["X_pca"] must contain at least two rows')
+    if not np.isfinite(pca_coordinates).all():
+        raise ValueError('adata_ref.obsm["X_pca"] contains non-finite values')
+
+    umap_ref = umap_module.UMAP(
+        n_neighbors=int(n_neighbors),
+        n_components=int(n_components),
+        learning_rate=alpha,
+        min_dist=min_dist,
+        spread=spread,
+        a=a,
+        b=b,
+        negative_sample_rate=int(negative_sample_rate),
+        init=init_coords,
+        random_state=random_state,
+        metric=metric,
+        metric_kwds=dict(metric_kwds),
+        **kwargs,
+    )
+    umap_ref.fit(pca_coordinates)
+    adata_ref.obsm["X_umap"] = np.asarray(umap_ref.embedding_).copy()
+
+    return umap_ref
+
+
+def quick_umap_proj(adata_new: AnnData, umap_ref: Any) -> np.ndarray:
+    """Project new observations through a fitted reference UMAP model.
+
+    Parameters
+    ----------
+    adata_new : anndata.AnnData
+        New object containing PCA coordinates in ``adata_new.obsm["X_pca"]``.
+        These coordinates must have been generated in the same PCA loading,
+        feature, scaling, and component space used to fit ``umap_ref``. The
+        AnnData object is read but not modified.
+    umap_ref : umap.umap_.UMAP
+        Fitted estimator returned by :func:`quick_umap`. It must provide a
+        callable ``transform`` method.
+
+    Returns
+    -------
+    numpy.ndarray
+        Projected UMAP coordinates with one row per observation in
+        ``adata_new`` and one column per UMAP component. The coordinates are
+        returned only; callers may store them in ``adata_new.obsm`` if desired.
+
+    Raises
+    ------
+    KeyError
+        If ``adata_new.obsm`` does not contain ``X_pca``.
+    TypeError
+        If ``umap_ref`` does not provide a callable ``transform`` method.
+    ValueError
+        If the new PCA matrix is empty, non-two-dimensional, contains
+        non-finite values, or has a different number of PCA components from
+        the fitted reference model when that requirement can be determined.
+
+    Examples
+    --------
+    >>> projected = quick_umap_proj(adata_query, model)
+    >>> adata_query.obsm["X_umap_ref"] = projected
+
+    Notes
+    -----
+    UMAP projection is meaningful only when the query PCA coordinates were
+    calculated using the reference preprocessing and PCA transformation. It
+    is not enough for the matrices merely to have the same number of columns.
+    """
+    if "X_pca" not in adata_new.obsm:
+        raise KeyError('adata_new.obsm must contain "X_pca"')
+    transform = getattr(umap_ref, "transform", None)
+    if not callable(transform):
+        raise TypeError("umap_ref must be a fitted model with transform()")
+
+    pca_coordinates = np.ascontiguousarray(
+        adata_new.obsm["X_pca"],
+        dtype=np.float32,
+    )
+    if pca_coordinates.ndim != 2:
+        raise ValueError('adata_new.obsm["X_pca"] must be two-dimensional')
+    if pca_coordinates.shape[0] == 0 or pca_coordinates.shape[1] == 0:
+        raise ValueError('adata_new.obsm["X_pca"] must not be empty')
+    if not np.isfinite(pca_coordinates).all():
+        raise ValueError('adata_new.obsm["X_pca"] contains non-finite values')
+
+    expected_features = getattr(umap_ref, "n_features_in_", None)
+    if expected_features is None:
+        reference_data = getattr(umap_ref, "_raw_data", None)
+        if reference_data is not None and np.ndim(reference_data) == 2:
+            expected_features = reference_data.shape[1]
+    if (
+        expected_features is not None
+        and pca_coordinates.shape[1] != expected_features
+    ):
+        raise ValueError(
+            "query PCA component count does not match the fitted UMAP model: "
+            f"expected {expected_features}, received {pca_coordinates.shape[1]}"
+        )
+
+    return np.asarray(transform(pca_coordinates))
+
+
+# =============================================================================
+# Exploratory differential expression
+# =============================================================================
+
+
+def wilcoxon_am1_vs_am2(
+    adata_AM: AnnData,
+    group_col: str = "MHCII_group",
+    am1_label: str = "MHCIIhi",
+    am2_label: str = "MHCIIlo",
+    use_raw: bool = True,
+    layer: str | None = None,
+    min_logfc: float = 0.25,
+    max_padj: float = 0.05,
+    min_pct: float = 0.10,
+    key_added: str = "AM1_AM2_wilcoxon",
+) -> dict[str, Any]:
+    """Compare two alveolar-macrophage groups with Scanpy Wilcoxon tests.
+
+    The function retains only the two requested annotation groups, runs
+    bidirectional marker testing, extracts complete result tables, and returns
+    filtered positive-marker tables for each group.
+
+    Parameters
+    ----------
+    adata_AM : anndata.AnnData
+        AnnData object containing alveolar macrophages or another population
+        whose two subgroups should be compared. The original object is not
+        modified; a copied two-group subset is returned.
+    group_col : str, default="MHCII_group"
+        Column in ``adata_AM.obs`` containing the two group labels.
+    am1_label : str, default="MHCIIhi"
+        Label treated as AM1 and compared against ``am2_label``.
+    am2_label : str, default="MHCIIlo"
+        Label treated as AM2 and compared against ``am1_label``. It must be
+        distinct from ``am1_label``.
+    use_raw : bool, default=True
+        Whether Scanpy should use ``adata_AM.raw`` as the expression source.
+        This cannot be enabled together with ``layer``. The selected source
+        must contain normalized, logarithmized expression rather than counts.
+    layer : str, optional
+        Normalized and logarithmized expression layer to test when
+        ``use_raw=False``. If both ``layer`` and ``use_raw`` are disabled,
+        ``adata_AM.X`` is used and must likewise be normalized and
+        logarithmized.
+    min_logfc : float, default=0.25
+        Minimum Scanpy log-fold-change estimate used to retain an upregulated
+        gene. The value must be finite.
+    max_padj : float, default=0.05
+        Maximum Benjamini-Hochberg-adjusted p-value used for filtering. Must
+        lie between zero and one, inclusive.
+    min_pct : float, default=0.10
+        Minimum fraction of cells expressing a gene in its focal group. Must
+        lie between zero and one, inclusive. Applied when Scanpy returns the
+        ``pct_nz_group`` column.
+    key_added : str, default="AM1_AM2_wilcoxon"
+        Key used to store Scanpy differential-expression results in the
+        returned subset's ``uns`` mapping.
+
+    Returns
+    -------
+    dict of str to object
+        Dictionary containing ``adata`` (the copied two-group subset),
+        ``am1_all`` and ``am2_all`` (complete Scanpy result data frames),
+        ``am1_up`` and ``am2_up`` (filtered positive-marker tables), and
+        ``key_added`` (the storage key used for the analysis). Complete tables
+        include ``comparison`` and ``upregulated_in`` provenance columns.
+
+    Raises
+    ------
+    KeyError
+        If ``group_col`` or the requested ``layer`` is absent.
+    TypeError
+        If a name, label, Boolean flag, or numerical threshold has the wrong
+        type.
+    ValueError
+        If labels are identical or absent, expression-source choices conflict,
+        ``adata.raw`` is required but missing, no genes are available, or a
+        filtering threshold is outside its permitted range.
+    ImportError
+        If Scanpy is not installed in the active environment.
+
+    Examples
+    --------
+    >>> result = wilcoxon_am1_vs_am2(
+    ...     adata_am,
+    ...     group_col="MHCII_group",
+    ...     am1_label="MHCIIhi",
+    ...     am2_label="MHCIIlo",
+    ...     use_raw=True,
+    ... )
+    >>> result["am1_up"].head()
+
+    Notes
+    -----
+    The function prints included cell counts and filtered marker counts to
+    standard output. Scanpy's approximate log-fold changes assume that the
+    selected expression source contains logarithmized data. The function
+    cannot infer preprocessing provenance reliably, so callers must verify
+    that ``adata.raw``, the selected layer, or ``adata.X`` contains normalized
+    log-expression values before running the analysis.
+
+    Scanpy's cell-level Wilcoxon procedure treats cells as observations. It is
+    appropriate for exploratory marker ranking, but it does not account for
+    biological replication. For inferential comparisons across replicated
+    samples or donors, use a donor-aware or sample-level pseudobulk model.
+    """
+    try:
+        import scanpy as sc
+    except ImportError as exc:
+        raise ImportError(
+            "wilcoxon_am1_vs_am2 requires Scanpy; install it in the analysis "
+            "environment before calling this function"
+        ) from exc
+
+    string_parameters = {
+        "group_col": group_col,
+        "am1_label": am1_label,
+        "am2_label": am2_label,
+        "key_added": key_added,
+    }
+    for parameter_name, parameter_value in string_parameters.items():
+        if not isinstance(parameter_value, str):
+            raise TypeError(f"{parameter_name} must be a string")
+        if not parameter_value.strip():
+            raise ValueError(f"{parameter_name} must be a non-empty string")
+    if am1_label == am2_label:
+        raise ValueError("am1_label and am2_label must be different")
+    if not isinstance(use_raw, bool):
+        raise TypeError("use_raw must be a Boolean")
+    if layer is not None and not isinstance(layer, str):
+        raise TypeError("layer must be a string or None")
+    if layer == "":
+        raise ValueError("layer must be a non-empty string when supplied")
+    if use_raw and layer is not None:
+        raise ValueError("choose either use_raw=True or a layer, not both")
+
+    threshold_parameters = {
+        "min_logfc": min_logfc,
+        "max_padj": max_padj,
+        "min_pct": min_pct,
+    }
+    thresholds: dict[str, float] = {}
+    for parameter_name, parameter_value in threshold_parameters.items():
+        if isinstance(parameter_value, bool):
+            raise TypeError(f"{parameter_name} must be numeric")
+        try:
+            thresholds[parameter_name] = float(parameter_value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{parameter_name} must be numeric") from exc
+        if not np.isfinite(thresholds[parameter_name]):
+            raise ValueError(f"{parameter_name} must be finite")
+    min_logfc = thresholds["min_logfc"]
+    max_padj = thresholds["max_padj"]
+    min_pct = thresholds["min_pct"]
+    if not 0 <= max_padj <= 1:
+        raise ValueError("max_padj must lie between zero and one")
+    if not 0 <= min_pct <= 1:
+        raise ValueError("min_pct must lie between zero and one")
+
+    if group_col not in adata_AM.obs.columns:
+        raise KeyError(f"column not found in adata_AM.obs: {group_col}")
+    observed_groups = set(adata_AM.obs[group_col].dropna().astype(str))
+    missing_groups = {am1_label, am2_label} - observed_groups
+    if missing_groups:
+        raise ValueError("missing groups: " + ", ".join(sorted(missing_groups)))
+    if use_raw and adata_AM.raw is None:
+        raise ValueError(
+            "use_raw=True, but adata_AM.raw is absent; set use_raw=False or "
+            "provide a normalized layer"
+        )
+    if layer is not None and layer not in adata_AM.layers:
+        raise KeyError(f"layer not found in adata_AM.layers: {layer}")
+
+    selected_cells = adata_AM.obs[group_col].astype(str).isin(
+        [am1_label, am2_label]
+    )
+    adata_de = adata_AM[selected_cells].copy()
+    adata_de.obs[group_col] = pd.Categorical(
+        adata_de.obs[group_col].astype(str),
+        categories=[am1_label, am2_label],
+        ordered=True,
+    )
+
+    print("Cells included:")
+    print(adata_de.obs[group_col].value_counts(sort=False))
+
+    number_genes = adata_de.raw.n_vars if use_raw else adata_de.n_vars
+    if number_genes == 0:
+        raise ValueError("the selected expression source contains no genes")
+
+    sc.tl.rank_genes_groups(
+        adata_de,
+        groupby=group_col,
+        groups=[am1_label, am2_label],
+        reference="rest",
+        method="wilcoxon",
+        corr_method="benjamini-hochberg",
+        tie_correct=True,
+        pts=True,
+        n_genes=number_genes,
+        use_raw=use_raw,
+        layer=layer,
+        key_added=key_added,
+    )
+
+    am1_all = sc.get.rank_genes_groups_df(
+        adata_de,
+        group=am1_label,
+        key=key_added,
+    )
+    am2_all = sc.get.rank_genes_groups_df(
+        adata_de,
+        group=am2_label,
+        key=key_added,
+    )
+
+    am1_all["comparison"] = f"{am1_label}_vs_{am2_label}"
+    am1_all["upregulated_in"] = am1_label
+    am2_all["comparison"] = f"{am2_label}_vs_{am1_label}"
+    am2_all["upregulated_in"] = am2_label
+
+    def filter_upregulated(table: pd.DataFrame) -> pd.DataFrame:
+        """Apply the caller's effect-size, FDR, and detection filters."""
+        keep = (
+            (table["logfoldchanges"] >= min_logfc)
+            & (table["pvals_adj"] <= max_padj)
+        )
+        if "pct_nz_group" in table.columns:
+            keep &= table["pct_nz_group"] >= min_pct
+        return (
+            table.loc[keep]
+            .sort_values(
+                ["logfoldchanges", "scores"],
+                ascending=[False, False],
+            )
+            .reset_index(drop=True)
+        )
+
+    am1_up = filter_upregulated(am1_all)
+    am2_up = filter_upregulated(am2_all)
+
+    print(f"\n{am1_label}-up genes: {len(am1_up):,}")
+    print(f"{am2_label}-up genes: {len(am2_up):,}")
+
+    return {
+        "adata": adata_de,
+        "am1_all": am1_all,
+        "am2_all": am2_all,
+        "am1_up": am1_up,
+        "am2_up": am2_up,
+        "key_added": key_added,
+    }
 
 
 # =============================================================================

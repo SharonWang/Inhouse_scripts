@@ -32,6 +32,8 @@ pandas, SciPy, and Matplotlib. Individual functions load additional packages
 only when needed:
 
 - Scanpy and AnnData for 10X import and AnnData expression extraction.
+- umap-learn for fitting a reusable reference UMAP model and projecting new
+  observations.
 - Seaborn for Seurat-style violin plots.
 - statsmodels when Benjamini-Hochberg adjustment is requested for violin-plot
   comparisons.
@@ -53,9 +55,12 @@ from Python.scRNAseq_preprocessing import (
     plot_adata_stacked_bar,
     plot_anndata_group_umap,
     plot_seurat_violins,
+    quick_umap,
+    quick_umap_proj,
     read_one_gsm,
     score_and_assign_two_signatures,
     trim_axs,
+    wilcoxon_am1_vs_am2,
 )
 ```
 
@@ -68,6 +73,9 @@ from Python.scRNAseq_preprocessing import (
 | Cell calling | `ordmag_filter()` | Applies an approximate Cell Ranger OrdMag Step 1 UMI threshold. | Cell mask, UMI threshold, and per-barcode UMI totals. |
 | Signature scoring | `score_and_assign_two_signatures()` | Scores two gene programs and assigns each cell to the higher-scoring signature. | The annotated input `AnnData` object. |
 | Expression summary | `cluster_expression_summary()` | Calculates mean expression and percentage detected for requested genes within each observed cell or spot group. | Long-form pandas `DataFrame`. |
+| Reference dimensionality reduction | `quick_umap()` | Fits a reusable umap-learn model to reference PCA coordinates and stores its embedding. | Fitted UMAP model; coordinates are also stored in the reference `AnnData`. |
+| Reference projection | `quick_umap_proj()` | Projects query PCA coordinates through a fitted reference UMAP model. | NumPy coordinate array. |
+| Exploratory marker analysis | `wilcoxon_am1_vs_am2()` | Runs bidirectional Scanpy Wilcoxon comparisons between two annotated AM groups. | Two-group `AnnData`, complete DE tables, and filtered marker tables. |
 | Figure layout | `trim_axs()` | Removes unused Matplotlib axes from a subplot grid. | Flattened array of retained axes. |
 | UMAP visualization | `plot_anndata_group_umap()` | Plots one or more categorical UMAP panels, including split and highlight modes. | Figure and axes array. |
 | Composition visualization | `plot_adata_stacked_bar()` | Calculates and plots cell-composition percentages from `adata.obs`. | Figure and axes; optionally the percentage table. |
@@ -200,6 +208,88 @@ input AnnData object is not modified.
 zero. It is therefore most directly interpretable on non-negative count or
 normalized-expression data; on centred or scaled layers it instead represents
 the percentage above that layer's zero point.
+
+### Reference UMAP fitting and projection
+
+#### `quick_umap(...)`
+
+Fits a `umap-learn` model directly to `adata_ref.obsm["X_pca"]`, stores a copy
+of the fitted coordinates in `adata_ref.obsm["X_umap"]`, and returns the fitted
+model for later projection. The distance metric and metric keyword arguments
+are recovered from `adata_ref.uns["neighbors"]["params"]` when available.
+
+```python
+umap_model = quick_umap(
+    adata_ref,
+    n_neighbors=15,
+    min_dist=0.3,
+    random_state=0,
+)
+```
+
+This helper fits from PCA coordinates; it does not optimize from Scanpy's
+stored connectivity graph and therefore is not intended to recreate an
+existing `sc.tl.umap()` result exactly. Parameters controlling the distance
+curve can be derived automatically from `spread` and `min_dist` or supplied as
+an explicit `a`, `b` pair.
+
+#### `quick_umap_proj(adata_new, umap_ref)`
+
+Transforms new PCA coordinates through the model returned by `quick_umap()`.
+The function returns the projected array without modifying the query object.
+
+```python
+query_umap = quick_umap_proj(adata_query, umap_model)
+adata_query.obsm["X_umap_ref"] = query_umap
+```
+
+The query must be transformed with the same feature set, scaling, PCA loadings,
+and component ordering used for the reference. Matching only the number of PCA
+columns is insufficient for a scientifically valid reference projection. Save
+the fitted UMAP model together with that PCA and preprocessing provenance.
+
+### Exploratory two-group marker analysis
+
+#### `wilcoxon_am1_vs_am2(...)`
+
+Subsets an AnnData object to two annotation groups, runs Scanpy's Wilcoxon
+marker procedure in both directions, and returns complete and filtered tables
+for each group. Although the defaults use `MHCIIhi` and `MHCIIlo`, both labels
+and the grouping column are configurable.
+
+```python
+de = wilcoxon_am1_vs_am2(
+    adata_am,
+    group_col="MHCII_group",
+    am1_label="MHCIIhi",
+    am2_label="MHCIIlo",
+    use_raw=True,
+    min_logfc=0.25,
+    max_padj=0.05,
+    min_pct=0.10,
+)
+
+mhcii_high_markers = de["am1_up"]
+mhcii_low_markers = de["am2_up"]
+```
+
+The returned dictionary contains the copied two-group subset in `adata`, full
+tables in `am1_all` and `am2_all`, filtered positive-marker tables in `am1_up`
+and `am2_up`, and the Scanpy result key in `key_added`. Filtering uses positive
+log-fold change, adjusted p-value, and—when Scanpy returns it—the fraction of
+cells expressing the gene in the focal group. The function also prints the
+included cell counts and the number of retained markers for each group.
+
+The selected expression source—`adata.raw`, a named layer, or `adata.X`—must
+contain normalized, log-transformed expression rather than raw counts.
+Scanpy's approximate log-fold-change estimates assume logarithmized input, and
+the function cannot reliably reconstruct that preprocessing provenance from an
+AnnData object alone.
+
+This is a cell-level exploratory marker-ranking workflow: cells are treated as
+observations, so the Wilcoxon p-values do not model biological replication.
+Use a donor-aware model or sample-level pseudobulk method for inference across
+replicated samples.
 
 ### Visualization
 
