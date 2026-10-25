@@ -27,11 +27,14 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "AT2_AGE_GROUP_COLORS",
     "MHCII_GROUP_COLORS",
     "WT_CKO_COLORS",
     "cluster_expression_summary",
     "convert_genes_to_features",
+    "match_genes_to_adata",
     "ordmag_filter",
+    "plot_at2_age_cell_style",
     "plot_adata_stacked_bar",
     "plot_anndata_group_umap",
     "plot_seurat_violins",
@@ -47,6 +50,13 @@ __all__ = [
 # =============================================================================
 # Reusable colour palettes
 # =============================================================================
+
+
+AT2_AGE_GROUP_COLORS = {
+    "Young": "#78B7A3",
+    "Old": "#D98973",
+}
+"""Reusable colour mapping for young- and old-age AT2 comparisons."""
 
 
 MHCII_GROUP_COLORS = {
@@ -382,6 +392,89 @@ def ordmag_filter(
     print(f"Called cells: {keep.sum():,}")
 
     return keep, threshold, total_umi
+
+
+# =============================================================================
+# Gene identifier matching
+# =============================================================================
+
+
+def match_genes_to_adata(
+    gene_list: Iterable[str],
+    adata: AnnData,
+) -> list[str]:
+    """Match requested genes to the variable names of an AnnData object.
+
+    Each requested gene is first matched exactly against ``adata.var_names``.
+    If no exact match exists, a case-insensitive match is attempted. When
+    multiple AnnData variables differ only by letter case, the first variable
+    in ``adata.var_names`` is used. Missing genes are omitted, and duplicate
+    matches are removed while preserving requested-gene order.
+
+    Parameters
+    ----------
+    gene_list : iterable of str
+        Gene names to match. Each value is converted to a stripped string.
+        Empty values and genes absent from ``adata.var_names`` are ignored.
+    adata : anndata.AnnData
+        AnnData object whose ``var_names`` define the available genes. The
+        object is inspected but is not modified.
+
+    Returns
+    -------
+    list[str]
+        Matched gene names using the exact spelling and capitalization stored
+        in ``adata.var_names``. The list contains no duplicates.
+
+    Raises
+    ------
+    TypeError
+        If ``gene_list`` is a single string rather than an iterable of gene
+        names.
+    AttributeError
+        If ``adata`` does not provide ``var_names``.
+
+    Examples
+    --------
+    >>> genes = match_genes_to_adata(["SFTPC", "Krt8"], adata)
+
+    Notes
+    -----
+    Case-insensitive matching can be ambiguous when variable names differ
+    only by capitalization. The first variable is retained deterministically.
+    """
+    if isinstance(gene_list, (str, bytes)):
+        raise TypeError("gene_list must be an iterable of gene names, not a string")
+
+    if not hasattr(adata, "var_names"):
+        raise AttributeError("adata must provide a var_names attribute")
+
+    var_names = pd.Index(adata.var_names).astype(str)
+    exact_names = set(var_names)
+
+    # Keep the first stored spelling for case-insensitive collisions.
+    upper_to_name: dict[str, str] = {}
+    for var_name in var_names:
+        upper_to_name.setdefault(var_name.upper(), var_name)
+
+    matched: list[str] = []
+    seen: set[str] = set()
+
+    for gene in gene_list:
+        normalized_gene = str(gene).strip()
+        if not normalized_gene:
+            continue
+
+        if normalized_gene in exact_names:
+            matched_gene = normalized_gene
+        else:
+            matched_gene = upper_to_name.get(normalized_gene.upper())
+
+        if matched_gene is not None and matched_gene not in seen:
+            matched.append(matched_gene)
+            seen.add(matched_gene)
+
+    return matched
 
 
 # =============================================================================
@@ -2885,3 +2978,295 @@ def plot_seurat_violins(
     if return_data:
         return stats_df, fig, axes_flat, expression_df
     return stats_df, fig, axes_flat
+
+
+def plot_at2_age_cell_style(
+    pct: pd.DataFrame,
+    at2_row: str = "AT2",
+    young_max_age: float = 6,
+    old_min_age: float = 18,
+    palette: Mapping[str, str] | None = None,
+    figsize: tuple[float, float] = (4.2, 4.8),
+    point_size: float = 55,
+    save: str | Path | None = None,
+) -> tuple[pd.DataFrame, Figure, Axes, Any]:
+    """Compare sample-level AT2 percentages between young and old animals.
+
+    The function parses a leading numeric age from each sample name, assigns
+    samples at or below ``young_max_age`` to ``"Young"`` and samples at or
+    above ``old_min_age`` to ``"Old"``, and omits intermediate ages. It draws
+    violins, internal box plots, and jittered biological-replicate points, then
+    annotates a two-sided Mann-Whitney U test.
+
+    Parameters
+    ----------
+    pct : pandas.DataFrame
+        Percentage table with cell types or groups in rows and biological
+        samples in columns. Values must be percentages in the inclusive range
+        0 to 100. Sample names must begin with a numeric age, for example
+        ``"18_Lung_OF1"``.
+    at2_row : str, default="AT2"
+        Row label containing the AT2 percentages.
+    young_max_age : float, default=6
+        Inclusive maximum age assigned to the Young group.
+    old_min_age : float, default=18
+        Inclusive minimum age assigned to the Old group. It must be greater
+        than ``young_max_age``.
+    palette : mapping of str to str or None, default=None
+        Colours for the ``"Young"`` and ``"Old"`` groups. ``None`` uses
+        :data:`AT2_AGE_GROUP_COLORS`. The supplied mapping is not modified.
+    figsize : tuple of float, default=(4.2, 4.8)
+        Matplotlib figure width and height in inches.
+    point_size : float, default=55
+        Area of each biological-replicate point in points squared.
+    save : str, pathlib.Path, or None, default=None
+        Optional output filename. Missing parent directories are created and
+        the figure is saved at 300 dpi with a transparent background.
+
+    Returns
+    -------
+    plot_df : pandas.DataFrame
+        Long-form table containing sample name, AT2 percentage, parsed age,
+        and ordered age group for the samples included in the comparison.
+    fig : matplotlib.figure.Figure
+        Matplotlib figure containing the completed plot.
+    ax : matplotlib.axes.Axes
+        Axis containing the violin, box plot, points, and test annotation.
+    test_result : scipy.stats._mannwhitneyu.MannwhitneyuResult
+        Two-sided Mann-Whitney U statistic and p-value.
+
+    Raises
+    ------
+    TypeError
+        If ``pct`` is not a pandas DataFrame.
+    KeyError
+        If ``at2_row`` is absent or the palette lacks a required group.
+    ValueError
+        If thresholds, figure settings, or extracted values are invalid, or
+        if either comparison group contains no usable samples.
+
+    Examples
+    --------
+    >>> plot_df, fig, ax, test = plot_at2_age_cell_style(
+    ...     pct,
+    ...     at2_row="AT2",
+    ...     save="outputs/AT2_young_old.pdf",
+    ... )
+
+    Notes
+    -----
+    The test treats biological samples, not cells, as observations. It does
+    not adjust for covariates, batch, pairing, or repeated measures.
+    """
+    if not isinstance(pct, pd.DataFrame):
+        raise TypeError("pct must be a pandas DataFrame")
+    if at2_row not in pct.index:
+        raise KeyError(f"{at2_row!r} was not found in pct.index")
+
+    thresholds = np.asarray([young_max_age, old_min_age], dtype=float)
+    if not np.all(np.isfinite(thresholds)) or young_max_age >= old_min_age:
+        raise ValueError(
+            "young_max_age and old_min_age must be finite and non-overlapping"
+        )
+
+    if len(figsize) != 2 or any(
+        not np.isfinite(value) or value <= 0 for value in figsize
+    ):
+        raise ValueError("figsize must contain two positive finite values")
+    if not np.isfinite(point_size) or point_size <= 0:
+        raise ValueError("point_size must be positive and finite")
+
+    resolved_palette = dict(
+        AT2_AGE_GROUP_COLORS if palette is None else palette
+    )
+    missing_palette_groups = set(AT2_AGE_GROUP_COLORS) - set(resolved_palette)
+    if missing_palette_groups:
+        raise KeyError(
+            "palette is missing age groups: "
+            + ", ".join(sorted(missing_palette_groups))
+        )
+
+    at2_values = pct.loc[at2_row]
+    if isinstance(at2_values, pd.DataFrame):
+        raise ValueError(f"pct contains duplicate rows named {at2_row!r}")
+
+    plot_df = pd.DataFrame(
+        {
+            "Age_Sample": at2_values.index.astype(str),
+            "AT2_percentage": pd.to_numeric(
+                at2_values.to_numpy(), errors="coerce"
+            ),
+        }
+    )
+    plot_df["Age"] = pd.to_numeric(
+        plot_df["Age_Sample"].str.extract(r"^(\d+(?:\.\d+)?)")[0],
+        errors="coerce",
+    )
+
+    invalid_age_samples = plot_df.loc[
+        plot_df["Age"].isna(), "Age_Sample"
+    ].tolist()
+    if invalid_age_samples:
+        raise ValueError(
+            "Could not parse a leading numeric age from samples: "
+            + ", ".join(invalid_age_samples)
+        )
+
+    percentage_values = plot_df["AT2_percentage"].to_numpy(dtype=float)
+    valid_percentages = (
+        np.isfinite(percentage_values)
+        & (percentage_values >= 0)
+        & (percentage_values <= 100)
+    )
+    if not np.all(valid_percentages):
+        invalid_percentage_samples = plot_df.loc[
+            ~valid_percentages, "Age_Sample"
+        ].tolist()
+        raise ValueError(
+            "AT2 percentages must be numeric, finite, and between 0 and 100 "
+            "for samples: "
+            + ", ".join(invalid_percentage_samples)
+        )
+
+    plot_df["Age_group"] = pd.NA
+    plot_df.loc[plot_df["Age"] <= young_max_age, "Age_group"] = "Young"
+    plot_df.loc[plot_df["Age"] >= old_min_age, "Age_group"] = "Old"
+    # Valid intermediate-age samples are intentionally outside the comparison.
+    plot_df = plot_df.dropna(subset=["Age_group"]).copy()
+
+    order = ["Young", "Old"]
+    plot_df["Age_group"] = pd.Categorical(
+        plot_df["Age_group"], categories=order, ordered=True
+    )
+    young = plot_df.loc[
+        plot_df["Age_group"] == "Young", "AT2_percentage"
+    ].astype(float)
+    old = plot_df.loc[
+        plot_df["Age_group"] == "Old", "AT2_percentage"
+    ].astype(float)
+    if young.empty or old.empty:
+        raise ValueError(
+            "Young and Old groups must each contain at least one usable sample"
+        )
+
+    import seaborn as sns
+    from scipy.stats import mannwhitneyu
+
+    test_result = mannwhitneyu(young, old, alternative="two-sided")
+    p_value = float(test_result.pvalue)
+    fig, ax = plt.subplots(figsize=figsize)
+
+    sns.violinplot(
+        data=plot_df,
+        x="Age_group",
+        y="AT2_percentage",
+        order=order,
+        palette=resolved_palette,
+        inner=None,
+        cut=0,
+        width=0.72,
+        linewidth=1.2,
+        saturation=0.9,
+        ax=ax,
+    )
+    for collection in ax.collections:
+        collection.set_edgecolor("black")
+        collection.set_linewidth(1.1)
+        collection.set_alpha(0.65)
+
+    sns.boxplot(
+        data=plot_df,
+        x="Age_group",
+        y="AT2_percentage",
+        order=order,
+        width=0.20,
+        showfliers=False,
+        showcaps=True,
+        boxprops={
+            "facecolor": "white",
+            "edgecolor": "black",
+            "linewidth": 1.2,
+            "zorder": 3,
+        },
+        medianprops={"color": "black", "linewidth": 1.5},
+        whiskerprops={"color": "black", "linewidth": 1.2},
+        capprops={"color": "black", "linewidth": 1.2},
+        ax=ax,
+    )
+
+    rng = np.random.default_rng(1)
+    for x_position, group in enumerate(order):
+        group_values = plot_df.loc[
+            plot_df["Age_group"] == group, "AT2_percentage"
+        ].astype(float).to_numpy()
+        jitter = rng.uniform(-0.085, 0.085, size=len(group_values))
+        ax.scatter(
+            np.full(len(group_values), x_position) + jitter,
+            group_values,
+            s=point_size,
+            facecolor=resolved_palette[group],
+            edgecolor="black",
+            linewidth=0.9,
+            alpha=0.95,
+            zorder=5,
+        )
+
+    data_min = float(plot_df["AT2_percentage"].min())
+    data_max = float(plot_df["AT2_percentage"].max())
+    data_range = max(data_max - data_min, 1.0)
+    bracket_y = data_max + 0.10 * data_range
+    bracket_height = 0.035 * data_range
+    ax.plot(
+        [0, 0, 1, 1],
+        [
+            bracket_y,
+            bracket_y + bracket_height,
+            bracket_y + bracket_height,
+            bracket_y,
+        ],
+        color="black",
+        linewidth=1.1,
+        clip_on=False,
+    )
+    p_label = (
+        r"$P < 0.001$" if p_value < 0.001 else rf"$P = {p_value:.3f}$"
+    )
+    ax.text(
+        0.5,
+        bracket_y + bracket_height + 0.015 * data_range,
+        p_label,
+        ha="center",
+        va="bottom",
+        fontsize=10,
+    )
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(
+        [f"Young\nn = {len(young)}", f"Old\nn = {len(old)}"]
+    )
+    ax.set_xlabel("")
+    ax.set_ylabel("AT2 cells (%)", fontsize=11)
+    ax.set_title("AT2 abundance", fontsize=12, pad=10)
+    ax.grid(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
+    ax.tick_params(axis="both", width=1.1, length=4, labelsize=10)
+    ax.set_ylim(
+        max(0, data_min - 0.10 * data_range),
+        bracket_y + 0.20 * data_range,
+    )
+    fig.tight_layout()
+
+    if save is not None:
+        output_path = Path(save)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+            transparent=True,
+        )
+
+    return plot_df, fig, ax, test_result

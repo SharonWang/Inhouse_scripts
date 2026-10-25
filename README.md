@@ -34,7 +34,7 @@ only when needed:
 - Scanpy and AnnData for 10X import and AnnData expression extraction.
 - umap-learn for fitting a reusable reference UMAP model and projecting new
   observations.
-- Seaborn for Seurat-style violin plots.
+- Seaborn for grouped expression and sample-level abundance violin plots.
 - statsmodels when Benjamini-Hochberg adjustment is requested for violin-plot
   comparisons.
 
@@ -47,13 +47,16 @@ When Python is started from the repository root:
 
 ```python
 from Python.scRNAseq_preprocessing import (
+    AT2_AGE_GROUP_COLORS,
     MHCII_GROUP_COLORS,
     WT_CKO_COLORS,
     cluster_expression_summary,
     convert_genes_to_features,
+    match_genes_to_adata,
     ordmag_filter,
     plot_adata_stacked_bar,
     plot_anndata_group_umap,
+    plot_at2_age_cell_style,
     plot_seurat_violins,
     quick_umap,
     quick_umap_proj,
@@ -71,6 +74,7 @@ from Python.scRNAseq_preprocessing import (
 | 10X preparation | `convert_genes_to_features()` | Converts legacy compressed 10X gene tables into modern feature tables. | List of output `Path` objects written during the call. |
 | Data loading | `read_one_gsm()` | Reads one GEO 10X matrix and records the original barcode and GSM accession. | `AnnData` object. |
 | Cell calling | `ordmag_filter()` | Applies an approximate Cell Ranger OrdMag Step 1 UMI threshold. | Cell mask, UMI threshold, and per-barcode UMI totals. |
+| Gene matching | `match_genes_to_adata()` | Matches requested genes exactly and then case-insensitively against AnnData variable names. | Ordered unique list of matched AnnData gene names. |
 | Signature scoring | `score_and_assign_two_signatures()` | Scores two gene programs and assigns each cell to the higher-scoring signature. | The annotated input `AnnData` object. |
 | Expression summary | `cluster_expression_summary()` | Calculates mean expression and percentage detected for requested genes within each observed cell or spot group. | Long-form pandas `DataFrame`. |
 | Reference dimensionality reduction | `quick_umap()` | Fits a reusable umap-learn model to reference PCA coordinates and stores its embedding. | Fitted UMAP model; coordinates are also stored in the reference `AnnData`. |
@@ -80,6 +84,7 @@ from Python.scRNAseq_preprocessing import (
 | UMAP visualization | `plot_anndata_group_umap()` | Plots one or more categorical UMAP panels, including split and highlight modes. | Figure and axes array. |
 | Composition visualization | `plot_adata_stacked_bar()` | Calculates and plots cell-composition percentages from `adata.obs`. | Figure and axes; optionally the percentage table. |
 | Expression visualization | `plot_seurat_violins()` | Draws grouped gene-expression violins with optional points, boxes, and exploratory tests. | Statistics table, figure, and axes; optionally extracted expression data. |
+| Sample-level abundance visualization | `plot_at2_age_cell_style()` | Compares young and old sample-level AT2 percentages with violins, box plots, replicate points, and a Mann-Whitney test. | Plotting table, figure, axis, and test result. |
 
 ### Data loading and 10X preparation
 
@@ -143,6 +148,26 @@ Important: this is an approximate preliminary cell-calling heuristic. It does
 not implement EmptyDrops-style testing, doublet detection, or complete
 dataset-specific QC. Inspect count distributions and select QC thresholds for
 each study rather than treating the default as universally appropriate.
+
+### Gene matching
+
+#### `match_genes_to_adata(gene_list, adata)`
+
+Matches marker genes against `adata.var_names`, trying exact spelling first
+and then a case-insensitive lookup. Returned names use the spelling stored in
+the AnnData object, duplicates are removed without changing request order, and
+unavailable genes are omitted.
+
+```python
+matched_markers = match_genes_to_adata(
+    ["SFTPC", "Krt8", "AGER"],
+    adata,
+)
+```
+
+When multiple variables differ only by capitalization, the first variable in
+`adata.var_names` is selected deterministically. The input AnnData object is
+not modified.
 
 ### Signature scoring and annotation
 
@@ -293,6 +318,31 @@ replicated samples.
 
 ### Visualization
 
+#### `plot_at2_age_cell_style(...)`
+
+Creates a sample-level AT2 abundance comparison between young and old animals.
+Leading numeric ages are parsed from sample names such as `18_Lung_OF1`;
+intermediate ages between the two configured thresholds are omitted. Input
+abundances must be percentages on the inclusive 0–100 scale.
+Unparseable sample ages and nonnumeric or non-finite AT2 percentages stop with
+an error naming the affected samples rather than silently changing group size.
+
+```python
+plot_df, fig, ax, test = plot_at2_age_cell_style(
+    pct,
+    at2_row="AT2",
+    young_max_age=6,
+    old_min_age=18,
+    palette=AT2_AGE_GROUP_COLORS,
+    save="outputs/AT2_young_old.pdf",
+)
+```
+
+The figure combines narrow violins, internal box plots, jittered biological-
+replicate points, and a two-sided Mann-Whitney U annotation. The statistical
+test uses samples—not individual cells—as observations, but it does not model
+batch, covariates, pairing, or repeated measures.
+
 #### `trim_axs(axs, N)`
 
 Flattens a Matplotlib axes collection, removes every axis after the first `N`
@@ -389,6 +439,7 @@ an appropriate mixed model.
 
 | Palette | Categories and colours | Intended use |
 |---|---|---|
+| `AT2_AGE_GROUP_COLORS` | `Young: #78B7A3`, `Old: #D98973` | Sample-level young-versus-old AT2 abundance plots. |
 | `MHCII_GROUP_COLORS` | `MHCIIhi: #E7B2B6`, `MHCIIlo: #B7C3E0` | High- and low-MHCII annotation groups. |
 | `WT_CKO_COLORS` | `WT: #898C8B`, `cKO: #9CB4CC` | Wild-type and conditional-knockout groups. |
 

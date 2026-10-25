@@ -19,6 +19,13 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added Python `match_genes_to_adata()` for ordered exact and
+  case-insensitive marker matching against AnnData variable names.
+- Added Python `plot_at2_age_cell_style()` for sample-level young-versus-old
+  AT2 abundance visualization with biological-replicate points and a
+  Mann-Whitney U comparison.
+- Added `AT2_AGE_GROUP_COLORS` as the reusable supplied Young/Old palette and
+  documented both new functions, their returns, assumptions, and usage.
 - Added eight R cell-communication and NicheNet utilities covering
   condition-specific CellChat, population expression summaries, custom
   ligand-receptor-target construction, circos/chord plots, GO enrichment,
