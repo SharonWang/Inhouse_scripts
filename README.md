@@ -422,7 +422,7 @@ and viridisLite in the functions that require them.
 | Monocle persistence | `load_monocle_compatible()` | Reloads a saved Monocle object and restores its preserved auxiliary entries. | Restored cell-data-set object. |
 | CellChat analysis | `run_cellchat()` | Runs a condition-specific CellChat workflow from a Seurat RNA assay after annotation and minimum-cell filtering. | Aggregated CellChat object. |
 | Population expression summary | `calculate_expression_summary()` | Calculates detection fraction and mean normalized expression from aligned count/expression matrices. | Gene-level summary data frame. |
-| Custom LRT construction | `build_lrt_from_custom_lr()` | Combines a custom ligand-receptor table, receiver targets, and NicheNet prior into prioritized ligand-receptor-target links. | Link, assignment, ordering, and provenance tables. |
+| Custom LRT construction | `build_lrt_from_custom_lr()` | Preserves supplied ligand-receptor rows and selects the strongest positive receiver targets directly from a ligand-target matrix. | Ordered LR/LT links, layout assignments, and ligands without target predictions. |
 | LRT circos visualization | `plot_lrt_circos()` | Draws the newer order-aware ligand-receptor-target circos implementation with exact sector validation. | Invisible plotting inputs, assignments, colours, and sector order. |
 | LR chord visualization | `plot_lr_chord()` | Draws a directional ligand-to-receptor chord diagram with comparable link alpha scaling. | Invisible chord data and resolved colours. |
 | NicheNet GO enrichment | `run_nichenet_gobp()` | Maps grouped symbols and runs GO enrichment against an explicit eligible-gene background. | Mappings, enrichment objects/results, and settings. |
@@ -560,9 +560,11 @@ Build and visualize custom ligand-receptor-target evidence:
 
 ```r
 lrt <- build_lrt_from_custom_lr(
-  lr_table,
-  AT2_target_genes,
-  ligand_target_matrix
+  lr_table = lr_table,
+  target_genes = AT2_target_genes,
+  lt_matrix = ligand_target_matrix,
+  n_targets_per_ligand = 20,
+  lr_weight_column = "lr_potential"
 )
 
 circos_info <- plot_lrt_circos(
@@ -582,12 +584,25 @@ plot_lr_chord(
 )
 ```
 
+The newest `build_lrt_from_custom_lr()` preserves every valid input LR row in
+its original order, including receptors shared by multiple ligands. It stops
+on invalid LR rows or malformed/non-finite matrix inputs rather than silently
+removing them, selects up to the requested number of strongest positive matrix
+targets per ligand, and reports ligands that lack target predictions.
+`target_genes` and `lt_matrix` are explicit required inputs so the reusable
+function does not depend on objects in the caller's global environment.
+
 The repository retains the newest supplied `plot_lrt_circos()` version. This
 version accepts `lr_order_table` as an ordering guide only: fitted pairs and
 weights always come from `lrt`, pairs absent from the guide are appended, and
 guide-only pairs are ignored. It preserves ligand and fitted-pair order across
 panels and validates the exact circos sector set before drawing. The three
 identical duplicate attachments and the older implementation were not added.
+Because the circos layout is anchored by ligand-target sectors, retained
+LR-only ligands without selected targets cannot be drawn; the plotting function
+warns about them and returns their names in `omitted_lr_only_ligands`. If no
+ligand has a selected target, it stops with an explanatory error while leaving
+all LR rows available in the builder result.
 
 Run GO enrichment with an explicit eligible-gene universe and create a shared
 heatmap:
