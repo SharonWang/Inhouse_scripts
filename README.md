@@ -420,6 +420,14 @@ and viridisLite in the functions that require them.
 | Monocle pseudotime heatmap | `make_Q1_pseudotime_heatmap()` | Predicts fitted expression along ordered pseudotime and builds a row-scaled ComplexHeatmap. | Heatmap, fitted matrices, ordered metadata, gene labels, and prediction diagnostics. |
 | Monocle persistence | `save_monocle_compatible()` | Saves a Monocle object while preserving legacy Seurat-associated dimensional-reduction entries separately. | Invisible output-directory path. |
 | Monocle persistence | `load_monocle_compatible()` | Reloads a saved Monocle object and restores its preserved auxiliary entries. | Restored cell-data-set object. |
+| CellChat analysis | `run_cellchat()` | Runs a condition-specific CellChat workflow from a Seurat RNA assay after annotation and minimum-cell filtering. | Aggregated CellChat object. |
+| Population expression summary | `calculate_expression_summary()` | Calculates detection fraction and mean normalized expression from aligned count/expression matrices. | Gene-level summary data frame. |
+| Custom LRT construction | `build_lrt_from_custom_lr()` | Combines a custom ligand-receptor table, receiver targets, and NicheNet prior into prioritized ligand-receptor-target links. | Link, assignment, ordering, and provenance tables. |
+| LRT circos visualization | `plot_lrt_circos()` | Draws the newer order-aware ligand-receptor-target circos implementation with exact sector validation. | Invisible plotting inputs, assignments, colours, and sector order. |
+| LR chord visualization | `plot_lr_chord()` | Draws a directional ligand-to-receptor chord diagram with comparable link alpha scaling. | Invisible chord data and resolved colours. |
+| NicheNet GO enrichment | `run_nichenet_gobp()` | Maps grouped symbols and runs GO enrichment against an explicit eligible-gene background. | Mappings, enrichment objects/results, and settings. |
+| NicheNet GO heatmap | `plot_nichenet_gobp_heatmap()` | Builds a group-by-term adjusted-significance ComplexHeatmap. | Heatmap, matrix, selected terms, and colour limit. |
+| NicheNet GO export | `save_nichenet_gobp_heatmap()` | Saves the GO heatmap as PDF, PNG, or TIFF. | Invisible normalized output path. |
 | Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
 | Bulk/pseudobulk structural QC | `check_featurecounts_project()` | Audits ordering, identifier uniqueness, invalid count values, integer-likeness, and assignment-rate summaries. | An invisible structured audit containing overall flags, individual checks, and assignment summary. |
 | Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
@@ -521,6 +529,87 @@ restored_cds <- load_monocle_compatible("outputs/monocle_checkpoint")
 Saving requires a new output location and writes a sibling
 `_seurat_aux.rds` file. With `verify=TRUE`, the saved object is reloaded and
 checked before the function returns.
+
+### Cell-cell communication and NicheNet utilities
+
+Run CellChat for one condition after removing missing annotations and groups
+below the requested cell threshold:
+
+```r
+cellchat_wt <- run_cellchat(
+  seurat_object,
+  condition = "WT",
+  condition_col = "sample",
+  group_col = "cell_type_subtype",
+  min_cells = 10
+)
+```
+
+The helper supports Seurat v5 layered RNA assays, creates normalized data when
+needed, aligns metadata to expression columns, and returns the aggregated
+CellChat object. Cell-level communication probabilities are exploratory; use
+replicated sample-aware analyses for condition-level biological inference.
+
+These utilities use CellChat, Seurat, SeuratObject, Matrix, dplyr, tidyr,
+tibble, purrr, scales, circlize, ComplexHeatmap, nichenetr, clusterProfiler,
+and an organism annotation package such as org.Mm.eg.db. Install the packages
+needed by the functions you call; they are referenced explicitly rather than
+attached automatically.
+
+Build and visualize custom ligand-receptor-target evidence:
+
+```r
+lrt <- build_lrt_from_custom_lr(
+  lr_table,
+  AT2_target_genes,
+  ligand_target_matrix
+)
+
+circos_info <- plot_lrt_circos(
+  lrt,
+  sender_label = "MHCIIhi",
+  sender_colour = "#D98989",
+  title_text = "MHCIIhi to AT2 signaling",
+  common_lt_range = c(0, 1),
+  common_lr_range = c(0, 1),
+  lr_order_table = lr_table
+)
+
+plot_lr_chord(
+  lr_table,
+  title = "Ligand-receptor evidence",
+  ligand_color = "#D98989"
+)
+```
+
+The repository retains the newest supplied `plot_lrt_circos()` version. This
+version accepts `lr_order_table` as an ordering guide only: fitted pairs and
+weights always come from `lrt`, pairs absent from the guide are appended, and
+guide-only pairs are ignored. It preserves ligand and fitted-pair order across
+panels and validates the exact circos sector set before drawing. The three
+identical duplicate attachments and the older implementation were not added.
+
+Run GO enrichment with an explicit eligible-gene universe and create a shared
+heatmap:
+
+```r
+go_result <- run_nichenet_gobp(
+  gene_list = list(MHCIIhi = genes_hi, MHCIIlo = genes_lo),
+  background_symbols = tested_background,
+  comparison_name = "AT2 response"
+)
+
+go_heatmap <- plot_nichenet_gobp_heatmap(go_result$result_table)
+save_nichenet_gobp_heatmap(go_heatmap, "outputs/nichenet_go.pdf")
+```
+
+The enrichment background must be the genes eligible for selection by the
+upstream workflow. GO enrichment and prioritized ligand-target links do not by
+themselves establish causal signaling. Foreground identifiers are restricted
+to the mapped background universe before enrichment; the conversion summary
+reports mapped, eligible, and out-of-universe counts. In the heatmap, zero
+means that a group-term combination was absent from the supplied significant
+results rather than that it was tested with an exact adjusted p-value of one.
 
 ### `read_featurecounts_project(...)`
 
@@ -1210,6 +1299,7 @@ species-specific NicheNet model.
 | `BULK_NICHENET_ACTIVITY_COLORS` | 100-colour white-to-purple gradient | Corrected AUPR ligand-activity heatmaps. |
 | `BULK_NICHENET_SENDER_COLORS` | Named pATM, cATM, and sATM colours | Sender annotations in NicheNet connectivity plots. |
 | `BULK_NICHENET_CONNECTIVITY_COLORS` | Two colours for absent/present links | Binary NicheNet connectivity matrices. |
+| `LRT_RECEPTOR_MACARON_COLORS` | 16 supplied macaron colours | Default receptor assignments in `plot_lrt_circos()`. |
 | `MONOCLE_PATH_CELLTYPE_COLORS` | Named AT2-2, AT2-1, AT1, and Club-cell colours | Cell-type backgrounds in selected Monocle path plots. |
 | `MONOCLE_HEATMAP_CELLTYPE_COLORS` | Named semi-transparent AT2-2, AT2-1, AT1, and Club-cell colours | Cell-type annotation in Monocle pseudotime heatmaps. |
 | `MONOCLE_PSEUDOTIME_COLORS` | 100-colour light-to-dark BuPu gradient | Continuous Monocle pseudotime UMAP scale. |

@@ -217,6 +217,20 @@ BULK_NICHENET_SENDER_COLORS <- c(
 BULK_NICHENET_CONNECTIVITY_COLORS <- c("#F5F5F5", "#8199C1")
 
 
+#' Receptor palette for ligand-receptor-target circos diagrams
+#'
+#' Sixteen supplied macaron colours assigned to receptor genes when an explicit
+#' named receptor palette is not provided.
+#'
+#' @return A character vector containing 16 hexadecimal colours.
+LRT_RECEPTOR_MACARON_COLORS <- c(
+    "#D98989", "#879BC5", "#69A995", "#AD83AD",
+    "#D783AE", "#70ABC4", "#72B59C", "#8E99C2",
+    "#CC8E85", "#65A795", "#9A82BE", "#D89898",
+    "#82B38D", "#C38DB2", "#779FC2", "#B58BC7"
+)
+
+
 #' Cell-type colours for Monocle trajectory plots
 #'
 #' Named palettes supplied for the selected AT2-2 to AT2-1/AT1 trajectory
@@ -8624,6 +8638,2889 @@ plot_bulk_tf_heatmap <- function(
                           clustering_method = clustering_method,
                           correlation_method = correlation_method,
                           color = color))
+}
+
+
+#' Build ligand-receptor-target links from a custom LR table
+#'
+#' @param lr_table Data frame containing ligand, receptor, and numeric LR score columns.
+#' @param AT2_target_genes Character vector of receiver target genes.
+#' @param ligand_target_matrix Numeric target-by-ligand NicheNet prior matrix.
+#' @param lr_score_col Character scalar naming the LR score column.
+#' @param n_target_candidates Positive integer number of top prior targets considered per ligand.
+#' @param n_targets_per_ligand Positive integer maximum retained targets per ligand.
+#' @param n_receptors_per_ligand NULL or a positive integer maximum retained receptors per ligand.
+#' @return A list containing retained ligands, weighted ligand-target and
+#'   ligand-receptor tables, target and receptor assignments, and the original
+#'   unmodified LR input table for provenance.
+#' @details This prioritization helper is not a statistical communication test; its links depend on the supplied LR scores and species-matched prior.
+#' @export
+build_lrt_from_custom_lr <- function(
+  lr_table,
+  AT2_target_genes,
+  ligand_target_matrix,
+  lr_score_col = "lr_potential",
+  n_target_candidates = 250,
+  n_targets_per_ligand = 5,
+  n_receptors_per_ligand = NULL
+) {
+
+  `%>%` <- dplyr::`%>%`
+
+  ## ------------------------------------------------------------
+  ## 1. Validate input
+  ## ------------------------------------------------------------
+
+  required_lr_columns <- c(
+    "ligand",
+    "receptor",
+    lr_score_col
+  )
+
+  missing_lr_columns <- setdiff(
+    required_lr_columns,
+    colnames(lr_table)
+  )
+
+  if (length(missing_lr_columns) > 0) {
+    stop(
+      "lr_table is missing: ",
+      paste(
+        missing_lr_columns,
+        collapse = ", "
+      )
+    )
+  }
+
+  if (nrow(lr_table) == 0) {
+    stop("lr_table contains no ligand-receptor pairs.")
+  }
+
+  if (length(AT2_target_genes) == 0) {
+    stop("AT2_target_genes is empty.")
+  }
+
+  positive_integer_arguments <- list(
+    n_target_candidates = n_target_candidates,
+    n_targets_per_ligand = n_targets_per_ligand
+  )
+
+  for (argument_name in names(positive_integer_arguments)) {
+    argument_value <- positive_integer_arguments[[argument_name]]
+
+    if (
+      length(argument_value) != 1 ||
+        !is.numeric(argument_value) ||
+        !is.finite(argument_value) ||
+        argument_value < 1 ||
+        argument_value != as.integer(argument_value)
+    ) {
+      stop(argument_name, " must be a positive integer.")
+    }
+  }
+
+  if (
+    !is.null(n_receptors_per_ligand) &&
+      (
+        length(n_receptors_per_ligand) != 1 ||
+          !is.numeric(n_receptors_per_ligand) ||
+          !is.finite(n_receptors_per_ligand) ||
+          n_receptors_per_ligand < 1 ||
+          n_receptors_per_ligand != as.integer(n_receptors_per_ligand)
+      )
+  ) {
+    stop("n_receptors_per_ligand must be NULL or a positive integer.")
+  }
+
+  if (
+    is.null(rownames(ligand_target_matrix)) ||
+      is.null(colnames(ligand_target_matrix))
+  ) {
+    stop(
+      "ligand_target_matrix must have gene row names ",
+      "and ligand column names."
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 2. Prepare the custom ligand-receptor links
+  ##
+  ## Here, weight is your expression-based lr_potential.
+  ## ------------------------------------------------------------
+
+  ligand_receptor_links <- lr_table %>%
+    dplyr::transmute(
+      ligand = as.character(ligand),
+      receptor = as.character(receptor),
+      weight = as.numeric(
+        .data[[lr_score_col]]
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(ligand),
+      !is.na(receptor),
+      !is.na(weight),
+      is.finite(weight),
+      weight > 0
+    ) %>%
+    dplyr::group_by(
+      ligand,
+      receptor
+    ) %>%
+    dplyr::summarise(
+      weight = max(
+        weight,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    )
+
+  if (nrow(ligand_receptor_links) == 0) {
+    stop(
+      "No positive finite ligand-receptor ",
+      "weights remain."
+    )
+  }
+
+  ## Optionally limit the number of receptors per ligand.
+  ## NULL retains every LR pair supplied in lr_table.
+
+  if (!is.null(n_receptors_per_ligand)) {
+
+    ligand_receptor_links <-
+      ligand_receptor_links %>%
+      dplyr::group_by(ligand) %>%
+      dplyr::slice_max(
+        order_by = weight,
+        n = n_receptors_per_ligand,
+        with_ties = FALSE
+      ) %>%
+      dplyr::ungroup()
+  }
+
+  ## ------------------------------------------------------------
+  ## 3. Rank ligands by their strongest custom LR potential
+  ## ------------------------------------------------------------
+
+  ligand_scores <- ligand_receptor_links %>%
+    dplyr::group_by(ligand) %>%
+    dplyr::summarise(
+      ligand_lr_score = max(
+        weight,
+        na.rm = TRUE
+      ),
+      n_receptors = dplyr::n_distinct(
+        receptor
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(
+      dplyr::desc(ligand_lr_score),
+      dplyr::desc(n_receptors),
+      ligand
+    )
+
+  ligand_order <- ligand_scores %>%
+    dplyr::pull(ligand)
+
+  ## Only ligands represented in the NicheNet
+  ## ligand-target matrix can receive predicted targets.
+
+  ligands_in_target_matrix <- intersect(
+    ligand_order,
+    colnames(ligand_target_matrix)
+  )
+
+  dropped_from_target_matrix <- setdiff(
+    ligand_order,
+    ligands_in_target_matrix
+  )
+
+  if (length(dropped_from_target_matrix) > 0) {
+    message(
+      "Dropping ligands absent from ligand_target_matrix: ",
+      paste(
+        dropped_from_target_matrix,
+        collapse = ", "
+      )
+    )
+  }
+
+  if (length(ligands_in_target_matrix) == 0) {
+    stop(
+      "None of the selected LR ligands are present ",
+      "in ligand_target_matrix."
+    )
+  }
+
+  ## Restrict the receiver target set to genes represented
+  ## in the NicheNet ligand-target matrix.
+
+  target_genes_use <- intersect(
+    unique(
+      as.character(
+        AT2_target_genes
+      )
+    ),
+    rownames(ligand_target_matrix)
+  )
+
+  if (length(target_genes_use) == 0) {
+    stop(
+      "None of AT2_target_genes are represented ",
+      "in ligand_target_matrix."
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 4. Get NicheNet downstream targets for each selected ligand
+  ## ------------------------------------------------------------
+
+  ligand_target_links <- purrr::map_dfr(
+    ligands_in_target_matrix,
+    function(ligand_i) {
+
+      nichenetr::get_weighted_ligand_target_links(
+        ligand = ligand_i,
+        geneset = target_genes_use,
+        ligand_target_matrix =
+          ligand_target_matrix,
+        n = n_target_candidates
+      )
+    }
+  ) %>%
+    dplyr::filter(
+      !is.na(ligand),
+      !is.na(target),
+      !is.na(weight),
+      is.finite(weight),
+      weight > 0
+    ) %>%
+    dplyr::group_by(
+      ligand,
+      target
+    ) %>%
+    dplyr::summarise(
+      weight = max(
+        weight,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(ligand) %>%
+    dplyr::slice_max(
+      order_by = weight,
+      n = n_targets_per_ligand,
+      with_ties = FALSE
+    ) %>%
+    dplyr::ungroup()
+
+  if (nrow(ligand_target_links) == 0) {
+    stop(
+      "No positive ligand-target links were found."
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 5. Retain ligands having both LR and target links
+  ## ------------------------------------------------------------
+
+  ligands_with_receptors <- unique(
+    ligand_receptor_links$ligand
+  )
+
+  ligands_with_targets <- unique(
+    ligand_target_links$ligand
+  )
+
+  usable_ligands <- ligand_order[
+    ligand_order %in%
+      intersect(
+        ligands_with_receptors,
+        ligands_with_targets
+      )
+  ]
+
+  if (length(usable_ligands) == 0) {
+    stop(
+      "No selected ligand has both receptor ",
+      "and downstream-target links."
+    )
+  }
+
+  dropped_ligands <- setdiff(
+    ligand_order,
+    usable_ligands
+  )
+
+  if (length(dropped_ligands) > 0) {
+    message(
+      "Dropping ligands without both link types: ",
+      paste(
+        dropped_ligands,
+        collapse = ", "
+      )
+    )
+  }
+
+  ligand_receptor_links <-
+    ligand_receptor_links %>%
+    dplyr::filter(
+      ligand %in% usable_ligands
+    ) %>%
+    dplyr::mutate(
+      ligand = factor(
+        ligand,
+        levels = usable_ligands
+      )
+    ) %>%
+    dplyr::arrange(
+      ligand,
+      dplyr::desc(weight)
+    ) %>%
+    dplyr::mutate(
+      ligand = as.character(ligand)
+    )
+
+  ligand_target_links <-
+    ligand_target_links %>%
+    dplyr::filter(
+      ligand %in% usable_ligands
+    ) %>%
+    dplyr::mutate(
+      ligand = factor(
+        ligand,
+        levels = usable_ligands
+      )
+    ) %>%
+    dplyr::arrange(
+      ligand,
+      dplyr::desc(weight)
+    ) %>%
+    dplyr::mutate(
+      ligand = as.character(ligand)
+    )
+
+  ## ------------------------------------------------------------
+  ## 6. Assign target sectors for the circos layout
+  ##
+  ## A target linked to multiple ligands is placed under the
+  ## ligand with the highest regulatory-potential weight.
+  ## All ligand-target links remain in ligand_target_links.
+  ## ------------------------------------------------------------
+
+  target_assignment <- ligand_target_links %>%
+    dplyr::group_by(target) %>%
+    dplyr::arrange(
+      dplyr::desc(weight),
+      match(
+        ligand,
+        usable_ligands
+      ),
+      .by_group = TRUE
+    ) %>%
+    dplyr::slice_head(
+      n = 1
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::transmute(
+      target,
+      assigned_ligand = ligand
+    )
+
+  ## ------------------------------------------------------------
+  ## 7. Assign receptor sectors
+  ##
+  ## The same receptor may be retained for several ligands.
+  ## This preserves the actual custom LR pairs.
+  ## ------------------------------------------------------------
+
+  receptor_assignment <- ligand_receptor_links %>%
+    dplyr::transmute(
+      receptor,
+      assigned_ligand = ligand,
+      weight
+    ) %>%
+    dplyr::distinct(
+      assigned_ligand,
+      receptor,
+      .keep_all = TRUE
+    )
+
+  ## ------------------------------------------------------------
+  ## 8. Diagnostic messages
+  ## ------------------------------------------------------------
+
+  message(
+    "Usable ligands: ",
+    length(usable_ligands)
+  )
+
+  message(
+    "Custom ligand-receptor pairs: ",
+    nrow(ligand_receptor_links)
+  )
+
+  message(
+    "Predicted ligand-target links: ",
+    nrow(ligand_target_links)
+  )
+
+  message(
+    "Unique receptors: ",
+    dplyr::n_distinct(
+      ligand_receptor_links$receptor
+    )
+  )
+
+  message(
+    "Unique target genes: ",
+    dplyr::n_distinct(
+      ligand_target_links$target
+    )
+  )
+
+  ligands_without_assigned_targets <- setdiff(
+    usable_ligands,
+    unique(
+      target_assignment$assigned_ligand
+    )
+  )
+
+  if (
+    length(ligands_without_assigned_targets) > 0
+  ) {
+    message(
+      "These ligands have target links but no uniquely ",
+      "assigned target sector: ",
+      paste(
+        ligands_without_assigned_targets,
+        collapse = ", "
+      )
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 9. Return object compatible with plot_lrt_circos()
+  ## ------------------------------------------------------------
+
+  list(
+    ligands = usable_ligands,
+    ligand_target = ligand_target_links,
+    ligand_receptor = ligand_receptor_links,
+    target_assignment = target_assignment,
+    receptor_assignment = receptor_assignment,
+    ligand_scores = ligand_scores,
+    lr_input = lr_table,
+    lr_score_name = lr_score_col
+  )
+}
+
+
+#' Plot a ligand-receptor-target circos diagram
+#'
+#' @param lrt_result List returned by [build_lrt_from_custom_lr()].
+#' @param sender_label Character scalar naming the sender population.
+#' @param sender_colour Valid R colour for ligand sectors and links.
+#' @param title_text Character scalar plot title.
+#' @param common_lt_range,common_lr_range Finite increasing numeric length-two ranges used to scale ligand-target and ligand-receptor weights.
+#' @param lr_order_table NULL or a ligand-receptor table controlling ligand and receptor-pair order.
+#' @param receptor_gene_colours NULL or a named receptor-colour vector.
+#' @param receptor_macaron_palette Colour vector assigned to receptors without explicit colours.
+#' @param target_colour_fallback,receptor_colour_fallback Fallback target and receptor colours.
+#' @param ligand_target_cex,receptor_cex Positive label-size multipliers.
+#' @param receptor_ring_offset Numeric radial receptor-ring offset.
+#' @param target_line_lengths,ligand_line_lengths,receptor_line_lengths Numeric length-two label-guide ranges.
+#' @param target_label_gap,ligand_label_gap,receptor_label_gap Non-negative label-spacing controls.
+#' @param target_line_lwd,ligand_line_lwd,receptor_line_lwd Positive guide-line widths.
+#' @param target_border_lwd Positive target-sector border width.
+#' @param ligand_label_colour,target_label_colour,receptor_label_colour Valid label colours.
+#' @return Invisibly returns visualization inputs, links, ordering, assignments, resolved colours, and sector metadata.
+#' @details Draws on the active graphics device and clears circlize state on exit.
+#' @export
+plot_lrt_circos <- function(
+  lrt_result,
+  sender_label,
+  sender_colour,
+  title_text,
+  common_lt_range,
+  common_lr_range,
+  lr_order_table = NULL,
+  receptor_gene_colours = NULL,
+  receptor_macaron_palette = LRT_RECEPTOR_MACARON_COLORS,
+  target_colour_fallback = "#D9BE9B",
+  receptor_colour_fallback = "#A9825C",
+  ligand_target_cex = 0.65,
+  receptor_cex = 0.60,
+  receptor_ring_offset = 0.00,
+  target_line_lengths = c(0.08, 0.30),
+  ligand_line_lengths = c(0.08, 0.30),
+  receptor_line_lengths = c(0.035, 0.075),
+  target_label_gap = 0.05,
+  ligand_label_gap = 0.05,
+  receptor_label_gap = 0.012,
+  target_line_lwd = 0.75,
+  ligand_line_lwd = 0.75,
+  receptor_line_lwd = 0.75,
+  target_border_lwd = 2.5,
+  ligand_label_colour = "black",
+  target_label_colour = "black",
+  receptor_label_colour = "black"
+) {
+
+  `%>%` <- dplyr::`%>%`
+
+  ## ============================================================
+  ## 1. Validate input
+  ## ============================================================
+
+  required_elements <- c(
+    "ligands",
+    "ligand_target",
+    "ligand_receptor",
+    "target_assignment",
+    "receptor_assignment"
+  )
+
+  missing_elements <- setdiff(
+    required_elements,
+    names(lrt_result)
+  )
+
+  if (length(missing_elements) > 0) {
+    stop(
+      "lrt_result is missing: ",
+      paste(missing_elements, collapse = ", ")
+    )
+  }
+
+  if (length(lrt_result$ligands) == 0) {
+    stop("No usable ligands are present in lrt_result.")
+  }
+
+  if (nrow(lrt_result$ligand_target) == 0) {
+    stop("No ligand-target links are present.")
+  }
+
+  if (nrow(lrt_result$ligand_receptor) == 0) {
+    stop("No ligand-receptor links are present.")
+  }
+
+  validate_two_lengths <- function(
+    x,
+    argument_name
+  ) {
+
+    if (
+      length(x) != 2 ||
+        any(!is.finite(x)) ||
+        any(x < 0)
+    ) {
+      stop(
+        argument_name,
+        " must contain two non-negative numeric values."
+      )
+    }
+  }
+
+  validate_two_lengths(
+    target_line_lengths,
+    "target_line_lengths"
+  )
+
+  validate_two_lengths(
+    ligand_line_lengths,
+    "ligand_line_lengths"
+  )
+
+  validate_two_lengths(
+    receptor_line_lengths,
+    "receptor_line_lengths"
+  )
+
+  validate_increasing_range <- function(
+    x,
+    argument_name
+  ) {
+    if (
+      length(x) != 2 ||
+        !is.numeric(x) ||
+        any(!is.finite(x)) ||
+        x[2] <= x[1]
+    ) {
+      stop(
+        argument_name,
+        " must contain two finite numeric values in increasing order."
+      )
+    }
+  }
+
+  validate_increasing_range(
+    common_lt_range,
+    "common_lt_range"
+  )
+
+  validate_increasing_range(
+    common_lr_range,
+    "common_lr_range"
+  )
+
+  sender_colour <- unname(
+    sender_colour[1]
+  )
+
+  old_xpd <- graphics::par("xpd")
+
+  graphics::par(
+    xpd = NA
+  )
+
+  on.exit(
+    graphics::par(
+      xpd = old_xpd
+    ),
+    add = TRUE
+  )
+
+  ## ============================================================
+  ## 2. Prepare ligand-target links
+  ## ============================================================
+
+  circos_links <- lrt_result$ligand_target %>%
+    dplyr::left_join(
+      lrt_result$target_assignment,
+      by = "target"
+    ) %>%
+    dplyr::filter(
+      !is.na(ligand),
+      !is.na(target),
+      !is.na(weight),
+      !is.na(assigned_ligand),
+      is.finite(weight),
+      weight > 0
+    ) %>%
+    dplyr::mutate(
+      ligand = as.character(ligand),
+      target = as.character(target),
+      assigned_ligand = as.character(assigned_ligand),
+      ligand_type = sender_label,
+      target_type = assigned_ligand
+    ) %>%
+    dplyr::select(
+      ligand,
+      target,
+      weight,
+      target_type,
+      ligand_type
+    ) %>%
+    dplyr::distinct(
+      ligand,
+      target,
+      .keep_all = TRUE
+    )
+
+  if (nrow(circos_links) == 0) {
+    stop(
+      "No ligand-target links remain after filtering."
+    )
+  }
+
+  ## ============================================================
+  ## 3. Preserve every LR pair
+  ## ============================================================
+
+  receptor_assignments <-
+    lrt_result$receptor_assignment %>%
+    dplyr::transmute(
+      original_order = dplyr::row_number(),
+      assigned_ligand = as.character(assigned_ligand),
+      receptor = as.character(receptor),
+      weight = as.numeric(weight)
+    )
+
+  if (!is.null(lr_order_table)) {
+
+    required_lr_columns <- c(
+      "ligand",
+      "receptor"
+    )
+
+    missing_lr_columns <- setdiff(
+      required_lr_columns,
+      colnames(lr_order_table)
+    )
+
+    if (length(missing_lr_columns) > 0) {
+      stop(
+        "lr_order_table must contain: ",
+        paste(missing_lr_columns, collapse = ", ")
+      )
+    }
+
+    order_lookup <- lr_order_table %>%
+      dplyr::transmute(
+        assigned_ligand = as.character(ligand),
+        receptor = as.character(receptor),
+        requested_order = dplyr::row_number()
+      ) %>%
+      dplyr::filter(
+        !is.na(assigned_ligand),
+        !is.na(receptor)
+      ) %>%
+      dplyr::group_by(
+        assigned_ligand,
+        receptor
+      ) %>%
+      dplyr::summarise(
+        requested_order = min(requested_order),
+        .groups = "drop"
+      )
+
+    last_requested_order <- max(
+      c(
+        order_lookup$requested_order,
+        0L
+      )
+    )
+
+    receptor_assignments <- receptor_assignments %>%
+      dplyr::left_join(
+        order_lookup,
+        by = c(
+          "assigned_ligand",
+          "receptor"
+        )
+      ) %>%
+      dplyr::mutate(
+        pair_order = dplyr::if_else(
+          is.na(requested_order),
+          last_requested_order + original_order,
+          requested_order
+        )
+      ) %>%
+      dplyr::arrange(
+        pair_order,
+        original_order
+      )
+
+  } else {
+
+    receptor_assignments <- receptor_assignments %>%
+      dplyr::mutate(
+        pair_order = original_order
+      )
+  }
+
+  receptor_assignments <-
+    receptor_assignments %>%
+    dplyr::filter(
+      !is.na(assigned_ligand),
+      !is.na(receptor),
+      !is.na(weight),
+      is.finite(weight),
+      weight > 0
+    ) %>%
+    dplyr::select(
+      pair_order,
+      assigned_ligand,
+      receptor,
+      weight
+    )
+
+  # Do not use distinct() here. Repeated LR pairs are retained.
+
+  if (nrow(receptor_assignments) == 0) {
+    stop(
+      "No valid ligand-receptor pairs remain."
+    )
+  }
+
+  ## ============================================================
+  ## 4. Obtain ligand and LR-pair order
+  ## ============================================================
+
+  if (!is.null(lr_order_table)) {
+
+    ligand_order <- lr_order_table %>%
+      dplyr::pull(ligand) %>%
+      as.character() %>%
+      unique()
+
+  } else {
+
+    ligand_order <- as.character(
+      lrt_result$ligands
+    )
+  }
+
+  retained_ligands <- unique(
+    circos_links$ligand
+  )
+
+  ligand_order <- unique(
+    c(
+      ligand_order[ligand_order %in% retained_ligands],
+      setdiff(retained_ligands, ligand_order)
+    )
+  )
+
+  circos_links <- circos_links %>%
+    dplyr::mutate(
+      ligand_order_number = match(
+        ligand,
+        ligand_order
+      )
+    ) %>%
+    dplyr::arrange(
+      ligand_order_number
+    ) %>%
+    dplyr::select(
+      -ligand_order_number
+    )
+
+  receptor_assignments <-
+    receptor_assignments %>%
+    dplyr::mutate(
+      ligand_order_number = match(
+        assigned_ligand,
+        ligand_order
+      )
+    ) %>%
+    dplyr::arrange(
+      ligand_order_number,
+      pair_order
+    ) %>%
+    dplyr::select(
+      -ligand_order_number
+    )
+
+  ## ============================================================
+  ## 5. Gene names
+  ## ============================================================
+
+  target_names <- trimws(
+    unique(
+      circos_links$target
+    )
+  )
+
+  ligand_names <- trimws(
+    unique(
+      circos_links$ligand
+    )
+  )
+
+  receptor_names <- unique(
+    receptor_assignments$receptor
+  )
+
+  ## ============================================================
+  ## 6. Generate receptor colors
+  ## ============================================================
+
+  if (is.null(receptor_gene_colours)) {
+
+    receptor_gene_colours <- stats::setNames(
+      rep(
+        receptor_macaron_palette,
+        length.out = length(receptor_names)
+      ),
+      receptor_names
+    )
+
+  } else {
+
+    if (is.null(names(receptor_gene_colours))) {
+      stop(
+        "receptor_gene_colours must be a named vector."
+      )
+    }
+
+    missing_receptors <- setdiff(
+      receptor_names,
+      names(receptor_gene_colours)
+    )
+
+    if (length(missing_receptors) > 0) {
+
+      additional_colours <- stats::setNames(
+        rep(
+          receptor_macaron_palette,
+          length.out = length(missing_receptors)
+        ),
+        missing_receptors
+      )
+
+      receptor_gene_colours <- c(
+        receptor_gene_colours,
+        additional_colours
+      )
+    }
+  }
+
+  ## ============================================================
+  ## 7. Initial NicheNet colors
+  ## ============================================================
+
+  ligand_colors <- stats::setNames(
+    sender_colour,
+    sender_label
+  )
+
+  target_groups <- unique(
+    circos_links$target_type
+  )
+
+  initial_target_colors <- stats::setNames(
+    rep(
+      target_colour_fallback,
+      length(target_groups)
+    ),
+    target_groups
+  )
+
+  widths <- list(
+    width_same_cell_same_ligand_type = 0.6,
+    width_different_cell = 4.5,
+    width_ligand_target = 12,
+    width_same_cell_same_target_type = 0.6
+  )
+
+  ## ============================================================
+  ## 8. Prepare circos data
+  ## ============================================================
+
+  vis <- nichenetr::prepare_circos_visualization(
+    circos_links = circos_links,
+    ligand_colors = ligand_colors,
+    target_colors = initial_target_colors,
+    widths = widths,
+    celltype_order = sender_label
+  )
+
+  if (nrow(vis$links_circle) == 0) {
+    stop(
+      "prepare_circos_visualization returned no links."
+    )
+  }
+
+  ## ============================================================
+  ## 9. Construct exact valid sector order
+  ## ============================================================
+
+  link_source_sectors <- unique(
+    as.character(
+      vis$links_circle[[1]]
+    )
+  )
+
+  link_target_sectors <- unique(
+    as.character(
+      vis$links_circle[[2]]
+    )
+  )
+
+  all_link_sectors <- unique(
+    c(
+      link_source_sectors,
+      link_target_sectors
+    )
+  )
+
+  original_vis_order <- as.character(
+    vis$order
+  )
+
+  original_vis_order <- original_vis_order[
+    original_vis_order %in%
+      all_link_sectors
+  ]
+
+  original_vis_order <- unique(
+    c(
+      original_vis_order,
+      setdiff(
+        all_link_sectors,
+        original_vis_order
+      )
+    )
+  )
+
+  ligand_sector_lookup <- tibble::tibble(
+    exact_sector = link_source_sectors,
+    ligand = trimws(link_source_sectors)
+  ) %>%
+    dplyr::filter(
+      ligand %in% ligand_names
+    ) %>%
+    dplyr::distinct(
+      exact_sector,
+      .keep_all = TRUE
+    )
+
+  desired_ligand_sectors <- vapply(
+    ligand_order,
+    function(ligand_i) {
+
+      matching_sectors <-
+        ligand_sector_lookup %>%
+        dplyr::filter(
+          ligand == ligand_i
+        ) %>%
+        dplyr::pull(
+          exact_sector
+        )
+
+      if (length(matching_sectors) == 0) {
+        return(
+          NA_character_
+        )
+      }
+
+      matching_sectors[1]
+    },
+    character(1)
+  )
+
+  desired_ligand_sectors <-
+    desired_ligand_sectors[
+      !is.na(desired_ligand_sectors)
+    ]
+
+  desired_ligand_sectors <- unique(
+    c(
+      desired_ligand_sectors,
+      setdiff(
+        ligand_sector_lookup$exact_sector,
+        desired_ligand_sectors
+      )
+    )
+  )
+
+  ligand_positions <- which(
+    original_vis_order %in%
+      ligand_sector_lookup$exact_sector
+  )
+
+  candidate_order <- original_vis_order
+
+  if (
+    length(ligand_positions) ==
+      length(desired_ligand_sectors)
+  ) {
+
+    candidate_order[ligand_positions] <-
+      desired_ligand_sectors
+
+  } else {
+
+    non_ligand_sectors <- original_vis_order[
+      !original_vis_order %in%
+        ligand_sector_lookup$exact_sector
+    ]
+
+    candidate_order <- c(
+      desired_ligand_sectors,
+      non_ligand_sectors
+    )
+  }
+
+  candidate_order <- candidate_order[
+    candidate_order %in%
+      all_link_sectors
+  ]
+
+  candidate_order <- unique(
+    c(
+      candidate_order,
+      setdiff(
+        all_link_sectors,
+        candidate_order
+      )
+    )
+  )
+
+  if (
+    length(candidate_order) !=
+      length(all_link_sectors) ||
+      !setequal(
+        candidate_order,
+        all_link_sectors
+      ) ||
+      anyDuplicated(candidate_order)
+  ) {
+
+    stop(
+      "Could not construct a valid circos sector order."
+    )
+  }
+
+  vis$order <- candidate_order
+
+  ## ============================================================
+  ## 10. Exact sector lookup tables
+  ## ============================================================
+
+  target_sector_lookup <- tibble::tibble(
+    exact_sector = link_target_sectors,
+    target = trimws(link_target_sectors)
+  ) %>%
+    dplyr::filter(
+      target %in% target_names
+    ) %>%
+    dplyr::distinct(
+      exact_sector,
+      .keep_all = TRUE
+    )
+
+  ligand_sector_lookup <- tibble::tibble(
+    exact_sector = link_source_sectors,
+    ligand = trimws(link_source_sectors)
+  ) %>%
+    dplyr::filter(
+      ligand %in% ligand_names
+    ) %>%
+    dplyr::distinct(
+      exact_sector,
+      .keep_all = TRUE
+    )
+
+  target_sector_order <- vis$order[
+    vis$order %in%
+      target_sector_lookup$exact_sector
+  ]
+
+  ligand_sector_order <- vis$order[
+    vis$order %in%
+      ligand_sector_lookup$exact_sector
+  ]
+
+  ## ============================================================
+  ## 11. Ligand-target link colors
+  ## ============================================================
+
+  link_weights <- as.numeric(
+    vis$links_circle$weight
+  )
+
+  link_alpha <- scales::rescale(
+    link_weights,
+    to = c(0.20, 0.85),
+    from = common_lt_range
+  )
+
+  link_alpha <- pmin(
+    pmax(
+      link_alpha,
+      0.20
+    ),
+    0.85
+  )
+
+  link_colours <- vapply(
+    link_alpha,
+    function(alpha_i) {
+
+      grDevices::adjustcolor(
+        sender_colour,
+        alpha.f = alpha_i
+      )
+    },
+    character(1)
+  )
+
+  ## ============================================================
+  ## 12. Initialize circos plot
+  ## ============================================================
+
+  circlize::circos.clear()
+
+  on.exit(
+    circlize::circos.clear(),
+    add = TRUE
+  )
+
+  circlize::circos.par(
+    start.degree = 90,
+    gap.degree = vis$gaps,
+    track.margin = c(
+      0.005,
+      0.005
+    ),
+    points.overflow.warning = FALSE
+  )
+
+  actual_sectors <- unique(
+    c(
+      as.character(vis$links_circle[[1]]),
+      as.character(vis$links_circle[[2]])
+    )
+  )
+
+  if (
+    length(vis$order) != length(actual_sectors) ||
+      !setequal(vis$order, actual_sectors) ||
+      anyDuplicated(vis$order)
+  ) {
+    stop(
+      "vis$order does not exactly match the circos sectors."
+    )
+  }
+
+  circlize::chordDiagram(
+    x = vis$links_circle,
+    directional = 1,
+    order = vis$order,
+    link.visible = rep(
+      TRUE,
+      nrow(vis$links_circle)
+    ),
+    col = link_colours,
+    grid.col = vis$ligand_colors,
+    grid.border = NA,
+    transparency = 0,
+    link.sort = TRUE,
+    link.decreasing = FALSE,
+    diffHeight = 0.005,
+    direction.type = c(
+      "diffHeight",
+      "arrows"
+    ),
+    link.arr.type = "big.arrow",
+    annotationTrack = "grid",
+    reduce = -1,
+    preAllocateTracks = list(
+      list(
+        track.height = 0.025
+      ),
+      list(
+        track.height = 0.25
+      )
+    )
+  )
+
+  ## ============================================================
+  ## 13. Angular helper functions
+  ## ============================================================
+
+  clockwise_width <- function(
+    start_degree,
+    end_degree
+  ) {
+
+    (
+      start_degree -
+        end_degree
+    ) %% 360
+  }
+
+  clockwise_midpoint <- function(
+    start_degree,
+    end_degree
+  ) {
+
+    (
+      start_degree -
+        clockwise_width(
+          start_degree,
+          end_degree
+        ) /
+        2
+    ) %% 360
+  }
+
+  angle_inside_clockwise_arc <- function(
+    angle,
+    start_degree,
+    end_degree,
+    tolerance = 1e-7
+  ) {
+
+    arc_width <- clockwise_width(
+      start_degree,
+      end_degree
+    )
+
+    distance_from_start <- (
+      start_degree -
+        angle
+    ) %% 360
+
+    distance_from_start <=
+      arc_width +
+      tolerance
+  }
+
+  ## ============================================================
+  ## 14. Calculate receptor arcs without removing LR pairs
+  ## ============================================================
+
+  receptor_padding <- 0.05
+  receptor_arc_layout_list <- list()
+  receptor_arc_counter <- 0L
+
+  for (
+    ligand_i in ligand_order
+  ) {
+
+    target_gene_order <-
+      lrt_result$target_assignment %>%
+      dplyr::filter(
+        assigned_ligand == ligand_i
+      ) %>%
+      dplyr::pull(target) %>%
+      as.character()
+
+    target_sectors <- vapply(
+      target_gene_order,
+      function(target_i) {
+
+        matching_sector <-
+          target_sector_lookup %>%
+          dplyr::filter(
+            target == target_i
+          ) %>%
+          dplyr::pull(
+            exact_sector
+          )
+
+        if (length(matching_sector) == 0) {
+          return(
+            NA_character_
+          )
+        }
+
+        matching_sector[1]
+      },
+      character(1)
+    )
+
+    target_sectors <- target_sectors[
+      !is.na(target_sectors)
+    ]
+
+    target_sectors <- target_sectors[
+      order(
+        match(
+          target_sectors,
+          vis$order
+        )
+      )
+    ]
+
+    receptor_table <-
+      receptor_assignments %>%
+      dplyr::filter(
+        assigned_ligand == ligand_i
+      ) %>%
+      dplyr::arrange(
+        pair_order
+      )
+
+    if (
+      length(target_sectors) == 0 ||
+        nrow(receptor_table) == 0
+    ) {
+      next
+    }
+
+    theta_start <- as.numeric(
+      circlize::get.cell.meta.data(
+        "cell.start.degree",
+        sector.index = target_sectors[1],
+        track.index = 1
+      )
+    )
+
+    theta_end <- as.numeric(
+      circlize::get.cell.meta.data(
+        "cell.end.degree",
+        sector.index = target_sectors[length(target_sectors)],
+        track.index = 1
+      )
+    )
+
+    total_angle <- clockwise_width(
+      theta_start,
+      theta_end
+    )
+
+    if (
+      !is.finite(total_angle) ||
+        total_angle <= 0
+    ) {
+      next
+    }
+
+    receptor_table <- receptor_table %>%
+      dplyr::mutate(
+        scaled_weight =
+          weight /
+            sum(weight) *
+            total_angle
+      )
+
+    current_theta <- theta_start
+
+    for (
+      receptor_i in seq_len(
+        nrow(receptor_table)
+      )
+    ) {
+
+      receptor_angle <-
+        receptor_table$scaled_weight[receptor_i]
+
+      end_theta <- (
+        current_theta -
+          receptor_angle
+      ) %% 360
+
+      receptor_arc_counter <-
+        receptor_arc_counter +
+        1L
+
+      receptor_arc_layout_list[[receptor_arc_counter]] <-
+        tibble::tibble(
+          pair_order =
+            receptor_table$pair_order[receptor_i],
+
+          ligand =
+            ligand_i,
+
+          receptor =
+            receptor_table$receptor[receptor_i],
+
+          weight =
+            receptor_table$weight[receptor_i],
+
+          start_degree =
+            current_theta %% 360,
+
+          end_degree =
+            end_theta
+        )
+
+      current_theta <- end_theta
+    }
+  }
+
+  receptor_arc_layout <- dplyr::bind_rows(
+    receptor_arc_layout_list
+  ) %>%
+    dplyr::arrange(
+      pair_order
+    )
+
+  if (nrow(receptor_arc_layout) == 0) {
+    stop(
+      "No receptor arcs could be constructed."
+    )
+  }
+
+  ## ============================================================
+  ## 15. Assign targets by physical receptor position
+  ## ============================================================
+
+  target_receptor_list <- list()
+  target_assignment_counter <- 0L
+
+  for (
+    target_sector in target_sector_order
+  ) {
+
+    target_gene <-
+      target_sector_lookup %>%
+      dplyr::filter(
+        exact_sector == target_sector
+      ) %>%
+      dplyr::pull(target) %>%
+      utils::head(1)
+
+    if (length(target_gene) == 0) {
+      target_gene <- trimws(
+        target_sector
+      )
+    }
+
+    target_ligand <-
+      lrt_result$target_assignment %>%
+      dplyr::filter(
+        target == target_gene
+      ) %>%
+      dplyr::pull(
+        assigned_ligand
+      ) %>%
+      utils::head(1)
+
+    target_start <- as.numeric(
+      circlize::get.cell.meta.data(
+        "cell.start.degree",
+        sector.index = target_sector,
+        track.index = 1
+      )
+    )
+
+    target_end <- as.numeric(
+      circlize::get.cell.meta.data(
+        "cell.end.degree",
+        sector.index = target_sector,
+        track.index = 1
+      )
+    )
+
+    target_midpoint <- clockwise_midpoint(
+      target_start,
+      target_end
+    )
+
+    candidate_arcs <- receptor_arc_layout %>%
+      dplyr::filter(
+        ligand == target_ligand
+      )
+
+    matching_arcs <- candidate_arcs %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        contains_target =
+          angle_inside_clockwise_arc(
+            angle = target_midpoint,
+            start_degree = start_degree,
+            end_degree = end_degree
+          )
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::filter(
+        contains_target
+      )
+
+    if (nrow(matching_arcs) > 0) {
+
+      assigned_receptor <-
+        matching_arcs$receptor[1]
+
+      assigned_pair_order <-
+        matching_arcs$pair_order[1]
+
+    } else if (nrow(candidate_arcs) > 0) {
+
+      nearest_arc <- candidate_arcs %>%
+        dplyr::rowwise() %>%
+        dplyr::mutate(
+          arc_midpoint = clockwise_midpoint(
+            start_degree,
+            end_degree
+          ),
+
+          direct_distance = abs(
+            target_midpoint -
+              arc_midpoint
+          ),
+
+          angular_distance = min(
+            direct_distance,
+            360 -
+              direct_distance
+          )
+        ) %>%
+        dplyr::ungroup() %>%
+        dplyr::arrange(
+          angular_distance,
+          pair_order
+        ) %>%
+        dplyr::slice_head(
+          n = 1
+        )
+
+      assigned_receptor <-
+        nearest_arc$receptor[1]
+
+      assigned_pair_order <-
+        nearest_arc$pair_order[1]
+
+    } else {
+
+      assigned_receptor <- NA_character_
+      assigned_pair_order <- NA_integer_
+    }
+
+    target_assignment_counter <-
+      target_assignment_counter +
+      1L
+
+    target_receptor_list[[target_assignment_counter]] <-
+      tibble::tibble(
+        target = as.character(target_gene),
+        exact_sector = as.character(target_sector),
+        assigned_ligand = as.character(target_ligand),
+        receptor = as.character(assigned_receptor),
+        pair_order = as.integer(assigned_pair_order),
+        target_midpoint = target_midpoint
+      )
+  }
+
+  target_receptor_assignment <-
+    dplyr::bind_rows(
+      target_receptor_list
+    )
+
+  ## ============================================================
+  ## 16. Assign target colors
+  ## ============================================================
+
+  target_gene_colours <- stats::setNames(
+    rep(
+      target_colour_fallback,
+      length(target_names)
+    ),
+    target_names
+  )
+
+  for (
+    target_i in target_names
+  ) {
+
+    receptor_i <-
+      target_receptor_assignment %>%
+      dplyr::filter(
+        target == target_i
+      ) %>%
+      dplyr::pull(
+        receptor
+      ) %>%
+      utils::head(1)
+
+    if (
+      length(receptor_i) == 1 &&
+        !is.na(receptor_i) &&
+        receptor_i %in%
+          names(receptor_gene_colours)
+    ) {
+
+      target_gene_colours[[target_i]] <-
+        receptor_gene_colours[[receptor_i]]
+    }
+  }
+
+  ## ============================================================
+  ## 17. Repaint target sectors
+  ## ============================================================
+
+  target_track_index <- 3
+
+  for (
+    target_sector in target_sector_order
+  ) {
+
+    target_gene <-
+      target_sector_lookup %>%
+      dplyr::filter(
+        exact_sector == target_sector
+      ) %>%
+      dplyr::pull(target) %>%
+      utils::head(1)
+
+    if (length(target_gene) == 0) {
+      target_gene <- trimws(
+        target_sector
+      )
+    }
+
+    target_block_colour <- target_gene_colours[[target_gene]]
+
+    if (
+      is.null(target_block_colour) ||
+        is.na(target_block_colour)
+    ) {
+      target_block_colour <-
+        target_colour_fallback
+    }
+
+    target_xlim <-
+      circlize::get.cell.meta.data(
+        "xlim",
+        sector.index = target_sector,
+        track.index = target_track_index
+      )
+
+    target_ylim <-
+      circlize::get.cell.meta.data(
+        "ylim",
+        sector.index = target_sector,
+        track.index = target_track_index
+      )
+
+    circlize::circos.rect(
+      xleft = target_xlim[1],
+      ybottom = target_ylim[1],
+      xright = target_xlim[2],
+      ytop = target_ylim[2],
+      sector.index = target_sector,
+      track.index = target_track_index,
+      col = target_block_colour,
+      border = target_block_colour,
+      lwd = target_border_lwd
+    )
+  }
+
+  ## ============================================================
+  ## 18. Prepare staggered labels
+  ## ============================================================
+
+  target_label_layer <- stats::setNames(
+    rep(
+      c(1, 2),
+      length.out = length(target_sector_order)
+    ),
+    target_sector_order
+  )
+
+  ligand_label_layer <- stats::setNames(
+    rep(
+      c(1, 2),
+      length.out = length(ligand_sector_order)
+    ),
+    ligand_sector_order
+  )
+
+  ligand_line_colour <-
+    grDevices::adjustcolor(
+      sender_colour,
+      alpha.f = 0.85
+    )
+
+  ## ============================================================
+  ## 19. Draw target and ligand labels
+  ## ============================================================
+
+  circlize::circos.track(
+    track.index = 2,
+
+    panel.fun = function(x, y) {
+
+      sector_name <-
+        circlize::get.cell.meta.data(
+          "sector.index"
+        )
+
+      xcenter <-
+        circlize::get.cell.meta.data(
+          "xcenter"
+        )
+
+      ylim <-
+        circlize::get.cell.meta.data(
+          "ylim"
+        )
+
+      track_height <- diff(
+        ylim
+      )
+
+      is_target <- sector_name %in%
+        target_sector_order
+
+      if (is_target) {
+
+        target_gene <-
+          target_sector_lookup %>%
+          dplyr::filter(
+            exact_sector == sector_name
+          ) %>%
+          dplyr::pull(target) %>%
+          utils::head(1)
+
+        if (length(target_gene) == 0) {
+          target_gene <- trimws(
+            sector_name
+          )
+        }
+
+        target_block_colour <-
+          target_gene_colours[[target_gene]]
+
+        if (
+          is.null(target_block_colour) ||
+            is.na(target_block_colour)
+        ) {
+          target_block_colour <-
+            target_colour_fallback
+        }
+
+        target_line_colour <-
+          grDevices::adjustcolor(
+            target_block_colour,
+            alpha.f = 0.85
+          )
+
+        layer_i <- target_label_layer[[sector_name]]
+
+        line_start_y <- ylim[1] +
+          0.015 *
+            track_height
+
+        line_end_y <- line_start_y +
+          target_line_lengths[layer_i] *
+            track_height
+
+        label_y <- line_end_y +
+          target_label_gap *
+            track_height
+
+        circlize::circos.lines(
+          x = c(
+            xcenter,
+            xcenter
+          ),
+          y = c(
+            line_start_y,
+            line_end_y
+          ),
+          col = target_line_colour,
+          lwd = target_line_lwd
+        )
+
+        circlize::circos.points(
+          x = xcenter,
+          y = line_start_y,
+          pch = 16,
+          cex = 0.22,
+          col = target_block_colour
+        )
+
+        circlize::circos.text(
+          x = xcenter,
+          y = label_y,
+          labels = target_gene,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(
+            0,
+            0.55
+          ),
+          cex = ligand_target_cex,
+          col = target_label_colour
+        )
+
+      } else {
+
+        if (
+          sector_name %in%
+            names(ligand_label_layer)
+        ) {
+
+          layer_i <- ligand_label_layer[[sector_name]]
+
+        } else {
+
+          layer_i <- 1
+        }
+
+        ligand_gene <-
+          ligand_sector_lookup %>%
+          dplyr::filter(
+            exact_sector == sector_name
+          ) %>%
+          dplyr::pull(ligand) %>%
+          utils::head(1)
+
+        if (length(ligand_gene) == 0) {
+          ligand_gene <- trimws(
+            sector_name
+          )
+        }
+
+        line_start_y <- ylim[1] +
+          0.015 *
+            track_height
+
+        line_end_y <- line_start_y +
+          ligand_line_lengths[layer_i] *
+            track_height
+
+        label_y <- line_end_y +
+          ligand_label_gap *
+            track_height
+
+        circlize::circos.lines(
+          x = c(
+            xcenter,
+            xcenter
+          ),
+          y = c(
+            line_start_y,
+            line_end_y
+          ),
+          col = ligand_line_colour,
+          lwd = ligand_line_lwd
+        )
+
+        circlize::circos.points(
+          x = xcenter,
+          y = line_start_y,
+          pch = 16,
+          cex = 0.22,
+          col = sender_colour
+        )
+
+        circlize::circos.text(
+          x = xcenter,
+          y = label_y,
+          labels = ligand_gene,
+          facing = "clockwise",
+          niceFacing = TRUE,
+          adj = c(
+            0,
+            0.55
+          ),
+          cex = ligand_target_cex,
+          font = 2,
+          col = ligand_label_colour
+        )
+      }
+    },
+
+    bg.border = NA
+  )
+
+  ## ============================================================
+  ## 20. Draw receptor arcs and labels
+  ## ============================================================
+
+  radial_position <- circlize::circlize(
+    c(0, 1),
+    c(0, 1),
+    track.index = 1
+  )
+
+  rou1 <- radial_position[1, "rou"] -
+    receptor_ring_offset
+
+  rou2 <- radial_position[2, "rou"] -
+    receptor_ring_offset
+
+  receptor_label_counter <- 0L
+
+  for (
+    receptor_i in seq_len(
+      nrow(receptor_arc_layout)
+    )
+  ) {
+
+    receptor_label_counter <-
+      receptor_label_counter +
+      1L
+
+    receptor_name <-
+      receptor_arc_layout$receptor[receptor_i]
+
+    receptor_weight <-
+      receptor_arc_layout$weight[receptor_i]
+
+    current_theta <-
+      receptor_arc_layout$start_degree[receptor_i]
+
+    end_theta <-
+      receptor_arc_layout$end_degree[receptor_i]
+
+    angle_width <- clockwise_width(
+      current_theta,
+      end_theta
+    )
+
+    receptor_alpha <- scales::rescale(
+      receptor_weight,
+      to = c(
+        0.55,
+        0.95
+      ),
+      from = common_lr_range
+    )
+
+    receptor_alpha <- pmin(
+      pmax(
+        receptor_alpha,
+        0.55
+      ),
+      0.95
+    )
+
+    receptor_base_colour <-
+      receptor_gene_colours[[receptor_name]]
+
+    if (
+      is.null(receptor_base_colour) ||
+        is.na(receptor_base_colour)
+    ) {
+      receptor_base_colour <-
+        receptor_colour_fallback
+    }
+
+    receptor_fill <-
+      grDevices::adjustcolor(
+        receptor_base_colour,
+        alpha.f = receptor_alpha
+      )
+
+    circlize::draw.sector(
+      start.degree =
+        current_theta -
+          angle_width *
+            receptor_padding,
+
+      end.degree =
+        end_theta +
+          angle_width *
+            receptor_padding,
+
+      rou1 = rou1,
+      rou2 = rou2,
+      clock.wise = TRUE,
+      col = receptor_fill,
+      border = NA
+    )
+
+    middle_theta <- clockwise_midpoint(
+      current_theta,
+      end_theta
+    )
+
+    theta_normalized <-
+      middle_theta %% 360
+
+    receptor_layer <- (
+      (
+        receptor_label_counter -
+          1L
+      ) %% 2L
+    ) + 1L
+
+    receptor_line_length <-
+      receptor_line_lengths[receptor_layer]
+
+    line_start_radius <- rou2
+
+    line_end_radius <- rou2 +
+      receptor_line_length
+
+    label_radius <- line_end_radius +
+      receptor_label_gap
+
+    theta_radians <-
+      theta_normalized *
+      pi /
+      180
+
+    line_start_x <-
+      line_start_radius *
+      cos(theta_radians)
+
+    line_start_y <-
+      line_start_radius *
+      sin(theta_radians)
+
+    line_end_x <-
+      line_end_radius *
+      cos(theta_radians)
+
+    line_end_y <-
+      line_end_radius *
+      sin(theta_radians)
+
+    label_x <-
+      label_radius *
+      cos(theta_radians)
+
+    label_y <-
+      label_radius *
+      sin(theta_radians)
+
+    receptor_line_colour <-
+      grDevices::adjustcolor(
+        receptor_base_colour,
+        alpha.f = 0.90
+      )
+
+    graphics::segments(
+      x0 = line_start_x,
+      y0 = line_start_y,
+      x1 = line_end_x,
+      y1 = line_end_y,
+      col = receptor_line_colour,
+      lwd = receptor_line_lwd
+    )
+
+    graphics::points(
+      x = line_start_x,
+      y = line_start_y,
+      pch = 16,
+      cex = 0.22,
+      col = receptor_base_colour
+    )
+
+    receptor_text_rotation <-
+      theta_normalized
+
+    receptor_text_flipped <- (
+      theta_normalized > 90 &&
+        theta_normalized < 270
+    )
+
+    if (receptor_text_flipped) {
+
+      receptor_text_rotation <- (
+        theta_normalized +
+          180
+      ) %% 360
+
+      receptor_text_adj <- c(
+        1,
+        0.5
+      )
+
+    } else {
+
+      receptor_text_adj <- c(
+        0,
+        0.5
+      )
+    }
+
+    graphics::text(
+      x = label_x,
+      y = label_y,
+      labels = receptor_name,
+      srt = receptor_text_rotation,
+      adj = receptor_text_adj,
+      cex = receptor_cex,
+      col = receptor_label_colour
+    )
+  }
+
+  ## ============================================================
+  ## 21. Add title
+  ## ============================================================
+
+  graphics::title(
+    main = title_text,
+    line = 2,
+    cex.main = 1.15
+  )
+
+  ## ============================================================
+  ## 22. Return plot information
+  ## ============================================================
+
+  invisible(
+    list(
+      visualization = vis,
+      circos_links = circos_links,
+      ligand_order = ligand_order,
+      receptor_assignments = receptor_assignments,
+      receptor_arc_layout = receptor_arc_layout,
+      target_receptor_assignment =
+        target_receptor_assignment,
+      target_gene_colours = target_gene_colours,
+      receptor_gene_colours = receptor_gene_colours,
+      target_sectors = target_sector_order,
+      ligand_sectors = ligand_sector_order
+    )
+  )
+}
+
+
+#' Run GO enrichment for NicheNet gene groups
+#'
+#' @param gene_list Named list of gene-symbol vectors to test.
+#' @param background_symbols Character vector defining the tested universe.
+#' @param comparison_name Character scalar recorded in returned results.
+#' @param OrgDb AnnotationDb object used for conversion and enrichment.
+#' @param from_type,key_type Character identifier types passed to clusterProfiler.
+#' @param ontology Gene Ontology branch, usually "BP".
+#' @param p_adjust_method Multiple-testing method.
+#' @param pvalue_cutoff,qvalue_cutoff Numeric cutoffs in [0, 1].
+#' @param min_gene_set_size,max_gene_set_size Positive gene-set size bounds.
+#' @param readable Logical scalar controlling readable result identifiers.
+#' @param pool Logical scalar passed to compareCluster/enrichGO.
+#' @return A list containing `comparison_name`, the clusterProfiler
+#'   `enrichment_object`, combined `result_table`, identifier
+#'   `conversion_table` and `conversion_summary`, mapped `entrez_gene_list`,
+#'   and `background_entrez` universe.
+#' @details The background must represent genes eligible for upstream selection; enrichment does not establish signaling causality.
+#' @export
+run_nichenet_gobp <- function(
+  gene_list,
+  background_symbols,
+  comparison_name = "NicheNet",
+  OrgDb = NULL,
+  from_type = "SYMBOL",
+  key_type = "ENTREZID",
+  ontology = "BP",
+  p_adjust_method = "BH",
+  pvalue_cutoff = 0.05,
+  qvalue_cutoff = 0.05,
+  min_gene_set_size = 3,
+  max_gene_set_size = 500,
+  readable = TRUE,
+  pool = TRUE
+) {
+
+  `%>%` <- dplyr::`%>%`
+  if (is.null(OrgDb)) OrgDb <- org.Mm.eg.db::org.Mm.eg.db
+
+  if (!is.list(gene_list)) {
+    stop(
+      "gene_list must be a named list of gene-symbol vectors."
+    )
+  }
+
+  if (is.null(names(gene_list))) {
+    stop(
+      "gene_list must have group names."
+    )
+  }
+
+  gene_list <- lapply(
+    gene_list,
+    function(x) {
+      unique(
+        as.character(
+          stats::na.omit(x)
+        )
+      )
+    }
+  )
+
+  background_symbols <- unique(
+    as.character(
+      stats::na.omit(
+        background_symbols
+      )
+    )
+  )
+
+  if (length(background_symbols) == 0) {
+    stop(
+      "No background genes were supplied."
+    )
+  }
+
+  all_symbols <- unique(
+    c(
+      unlist(
+        gene_list,
+        use.names = FALSE
+      ),
+      background_symbols
+    )
+  )
+
+  message(
+    "Converting ",
+    length(all_symbols),
+    " unique gene symbols to Entrez IDs."
+  )
+
+  conversion_table <- clusterProfiler::bitr(
+    all_symbols,
+    fromType = from_type,
+    toType = key_type,
+    OrgDb = OrgDb
+  ) %>%
+    dplyr::distinct(
+      .data[[from_type]],
+      .data[[key_type]]
+    )
+
+  if (nrow(conversion_table) == 0) {
+    stop(
+      "No genes could be converted to ",
+      key_type,
+      "."
+    )
+  }
+
+  background_entrez <- conversion_table %>%
+    dplyr::filter(
+      .data[[from_type]] %in%
+        background_symbols
+    ) %>%
+    dplyr::pull(
+      .data[[key_type]]
+    ) %>%
+    unique()
+
+  if (length(background_entrez) == 0) {
+    stop(
+      "No background genes could be converted to ",
+      key_type,
+      "."
+    )
+  }
+
+  mapped_entrez_gene_list <- lapply(
+    gene_list,
+    function(symbols_i) {
+
+      conversion_table %>%
+        dplyr::filter(
+          .data[[from_type]] %in%
+            symbols_i
+        ) %>%
+        dplyr::pull(
+          .data[[key_type]]
+        ) %>%
+        unique()
+    }
+  )
+
+  entrez_gene_list <- lapply(
+    mapped_entrez_gene_list,
+    intersect,
+    y = background_entrez
+  )
+
+  conversion_summary <- tibble::tibble(
+    Cluster = names(gene_list),
+
+    input_symbols = vapply(
+      gene_list,
+      length,
+      integer(1)
+    ),
+
+    mapped_entrez = vapply(
+      mapped_entrez_gene_list,
+      length,
+      integer(1)
+    ),
+
+    eligible_entrez = vapply(
+      entrez_gene_list,
+      length,
+      integer(1)
+    ),
+
+    dropped_outside_background =
+      mapped_entrez - eligible_entrez
+  )
+
+  message(
+    "Gene conversion summary:"
+  )
+
+  print(
+    conversion_summary
+  )
+
+  empty_groups <- names(
+    entrez_gene_list
+  )[
+    lengths(entrez_gene_list) == 0
+  ]
+
+  if (length(empty_groups) > 0) {
+    stop(
+      "No converted genes remain inside the background universe for: ",
+      paste(
+        empty_groups,
+        collapse = ", "
+      )
+    )
+  }
+
+  message(
+    "Running compareCluster GO ",
+    ontology,
+    " enrichment."
+  )
+
+  enrichment_object <- clusterProfiler::compareCluster(
+    geneCluster = entrez_gene_list,
+    fun = "enrichGO",
+    OrgDb = OrgDb,
+    keyType = key_type,
+    ont = ontology,
+    universe = background_entrez,
+    pAdjustMethod = p_adjust_method,
+    pvalueCutoff = pvalue_cutoff,
+    qvalueCutoff = qvalue_cutoff,
+    minGSSize = min_gene_set_size,
+    maxGSSize = max_gene_set_size,
+    readable = readable,
+    pool = pool
+  )
+
+  result_table <- as.data.frame(
+    enrichment_object
+  )
+
+  if (nrow(result_table) == 0) {
+
+    warning(
+      "No significantly enriched GO terms were found."
+    )
+
+    return(
+      list(
+        comparison_name = comparison_name,
+        enrichment_object = enrichment_object,
+        result_table = result_table,
+        conversion_table = conversion_table,
+        conversion_summary = conversion_summary,
+        entrez_gene_list = entrez_gene_list,
+        background_entrez = background_entrez
+      )
+    )
+  }
+
+  result_table <- result_table %>%
+    dplyr::mutate(
+      comparison = comparison_name,
+      Cluster = as.character(Cluster),
+      Description = as.character(Description),
+      GeneRatio_numeric = vapply(
+        GeneRatio,
+        function(x) {
+
+          ratio_parts <- strsplit(
+            as.character(x),
+            "/",
+            fixed = TRUE
+          )[[1]]
+
+          if (length(ratio_parts) != 2) {
+            return(
+              NA_real_
+            )
+          }
+
+          as.numeric(ratio_parts[1]) /
+            as.numeric(ratio_parts[2])
+        },
+        numeric(1)
+      ),
+      BgRatio_numeric = vapply(
+        BgRatio,
+        function(x) {
+
+          ratio_parts <- strsplit(
+            as.character(x),
+            "/",
+            fixed = TRUE
+          )[[1]]
+
+          if (length(ratio_parts) != 2) {
+            return(
+              NA_real_
+            )
+          }
+
+          as.numeric(ratio_parts[1]) /
+            as.numeric(ratio_parts[2])
+        },
+        numeric(1)
+      ),
+      FoldEnrichment =
+        GeneRatio_numeric /
+        BgRatio_numeric,
+      logFDR = -log10(
+        pmax(
+          p.adjust,
+          1e-300
+        )
+      )
+    ) %>%
+    dplyr::arrange(
+      Cluster,
+      p.adjust,
+      dplyr::desc(Count)
+    )
+
+  list(
+    comparison_name = comparison_name,
+    enrichment_object = enrichment_object,
+    result_table = result_table,
+    conversion_table = conversion_table,
+    conversion_summary = conversion_summary,
+    entrez_gene_list = entrez_gene_list,
+    background_entrez = background_entrez
+  )
+}
+
+
+#' Run a condition-specific CellChat analysis from a Seurat object
+#'
+#' @param seurat_object A Seurat object containing an RNA assay.
+#' @param condition Character scalar selecting cells from `condition_col`.
+#' @param condition_col Character scalar naming condition metadata.
+#' @param group_col Character scalar naming cell-type/group metadata.
+#' @param database NULL or a CellChat ligand-receptor database; NULL uses the
+#'   mouse database.
+#' @param min_cells Positive integer minimum cells per retained group and
+#'   communication filter.
+#' @param population_size Logical scalar passed to `computeCommunProb()`.
+#' @return A fitted CellChat object with pathway probabilities and aggregated
+#'   interaction networks. The input Seurat object is not modified.
+#' @details CellChat probabilities are exploratory cell-level communication
+#'   scores. Biological replication and condition-level inference require
+#'   appropriately replicated sample-aware comparisons.
+#' @export
+run_cellchat <- function(
+    seurat_object,
+    condition,
+    condition_col = "sample",
+    group_col = "cell_type_subtype",
+    database = NULL,
+    min_cells = 10,
+    population_size = TRUE
+) {
+    if (!is.character(condition) || length(condition) != 1L || is.na(condition)) {
+        stop("condition must be a non-missing character scalar.")
+    }
+    if (!all(c(condition_col, group_col) %in% colnames(seurat_object@meta.data))) {
+        stop("condition_col and group_col must exist in Seurat metadata.")
+    }
+    if (length(min_cells) != 1L || !is.numeric(min_cells) || !is.finite(min_cells) ||
+        min_cells < 1 || min_cells != as.integer(min_cells)) {
+        stop("min_cells must be a positive integer.")
+    }
+    if (!is.logical(population_size) || length(population_size) != 1L || is.na(population_size)) {
+        stop("population_size must be a non-missing logical scalar.")
+    }
+    if (is.null(database)) database <- CellChat::CellChatDB.mouse
+    message("Running CellChat for: ", condition)
+    condition_values <- as.character(seurat_object@meta.data[[condition_col]])
+    cells_use <- colnames(seurat_object)[
+        !is.na(condition_values) & condition_values == condition
+    ]
+    if (length(cells_use) == 0L) stop("No cells found for condition: ", condition)
+    seu <- subset(seurat_object, cells = cells_use)
+    annotated <- rownames(seu@meta.data)[!is.na(seu@meta.data[[group_col]])]
+    if (length(annotated) == 0L) stop("No selected cells have group annotations.")
+    seu <- subset(seu, cells = annotated)
+    seu@meta.data[[group_col]] <- droplevels(factor(seu@meta.data[[group_col]]))
+    message("Initial cell numbers:")
+    print(table(seu@meta.data[[group_col]]))
+    group_counts <- table(seu@meta.data[[group_col]])
+    valid_groups <- names(group_counts[group_counts >= min_cells])
+    removed_groups <- names(group_counts[group_counts < min_cells])
+    if (length(valid_groups) == 0L) stop("No groups meet min_cells.")
+    if (length(removed_groups)) {
+        message("Removing groups with fewer than ", min_cells, " cells: ",
+                paste(removed_groups, collapse = ", "))
+    }
+    cells_keep <- rownames(seu@meta.data)[
+        as.character(seu@meta.data[[group_col]]) %in% valid_groups
+    ]
+    seu <- subset(seu, cells = cells_keep)
+    seu@meta.data[[group_col]] <- droplevels(factor(seu@meta.data[[group_col]]))
+    message("Final cell numbers:")
+    print(table(seu@meta.data[[group_col]]))
+
+    SeuratObject::DefaultAssay(seu) <- "RNA"
+    if (inherits(seu[["RNA"]], "Assay5")) {
+        message("Assay5 detected; joining RNA layers.")
+        seu <- SeuratObject::JoinLayers(seu, assay = "RNA")
+    }
+    if (!"data" %in% SeuratObject::Layers(seu[["RNA"]])) {
+        message("Normalized RNA data layer absent; running NormalizeData().")
+        seu <- Seurat::NormalizeData(
+            seu, assay = "RNA", normalization.method = "LogNormalize",
+            scale.factor = 10000, verbose = FALSE
+        )
+    }
+    data_input <- SeuratObject::LayerData(seu, assay = "RNA", layer = "data")
+    meta_input <- seu@meta.data[, group_col, drop = FALSE]
+    colnames(meta_input) <- "cell_type"
+    meta_input <- meta_input[colnames(data_input), , drop = FALSE]
+    if (!identical(rownames(meta_input), colnames(data_input))) {
+        stop("CellChat metadata and expression columns are not aligned.")
+    }
+    message("Expression matrix: ", nrow(data_input), " genes × ", ncol(data_input), " cells")
+    cellchat <- CellChat::createCellChat(data_input, meta = meta_input, group.by = "cell_type")
+    cellchat@DB <- database
+    cellchat <- CellChat::subsetData(cellchat)
+    cellchat <- CellChat::identifyOverExpressedGenes(cellchat)
+    cellchat <- CellChat::identifyOverExpressedInteractions(cellchat)
+    cellchat <- CellChat::computeCommunProb(
+        cellchat, type = "triMean", trim = 0.1, raw.use = TRUE,
+        population.size = population_size
+    )
+    cellchat <- CellChat::filterCommunication(cellchat, min.cells = min_cells)
+    cellchat <- CellChat::computeCommunProbPathway(cellchat)
+    CellChat::aggregateNet(cellchat)
+}
+
+
+#' Summarize expression within a selected cell population
+#'
+#' @param counts_mat Gene-by-cell raw-count matrix with row and column names.
+#' @param data_mat Gene-by-cell normalized-expression matrix aligned exactly to
+#'   `counts_mat`.
+#' @param cells Character vector of cell names to summarize.
+#' @param population_name Character scalar recorded in the output.
+#' @return A data frame containing gene, population, detected-cell fraction,
+#'   mean normalized expression, and cell count.
+#' @export
+calculate_expression_summary <- function(
+    counts_mat,
+    data_mat,
+    cells,
+    population_name
+) {
+    if (length(cells) == 0L) stop("No cells provided for: ", population_name)
+    if (is.null(rownames(counts_mat)) || is.null(colnames(counts_mat)) ||
+        !identical(rownames(counts_mat), rownames(data_mat)) ||
+        !identical(colnames(counts_mat), colnames(data_mat))) {
+        stop("counts_mat and data_mat must have identical gene and cell names.")
+    }
+    missing_cells <- setdiff(cells, colnames(counts_mat))
+    if (length(missing_cells)) stop("Unknown cells: ", paste(missing_cells, collapse = ", "))
+    counts_subset <- counts_mat[, cells, drop = FALSE]
+    data_subset <- data_mat[, cells, drop = FALSE]
+    data.frame(
+        gene = rownames(counts_subset), population = population_name,
+        pct_expr = as.numeric(Matrix::rowMeans(counts_subset > 0)),
+        mean_expr = as.numeric(Matrix::rowMeans(data_subset)),
+        n_cells = length(cells), stringsAsFactors = FALSE
+    )
+}
+
+
+#' Draw a ligand-receptor chord diagram
+#'
+#' @param lr_table Data frame with ligand, receptor, and numeric `lr_potential`.
+#' @param title Character scalar plot title.
+#' @param ligand_color,receptor_color Valid R colours for ligand and receptor sectors.
+#' @param common_max NULL or positive shared maximum used for comparable link alpha.
+#' @param label_cex Positive sector-label size.
+#' @return Invisibly returns chord input, node colours, and link colours; returns
+#'   NULL after drawing an empty-state panel when no links are supplied.
+#' @export
+plot_lr_chord <- function(
+    lr_table, title, ligand_color, receptor_color = "#D9BE9B",
+    common_max = NULL, label_cex = 0.75
+) {
+    required <- c("ligand", "receptor", "lr_potential")
+    if (!all(required %in% colnames(lr_table))) stop("lr_table is missing required columns.")
+    lr_table$lr_potential <- suppressWarnings(as.numeric(lr_table$lr_potential))
+    lr_table <- lr_table[
+        !is.na(lr_table$ligand) & nzchar(trimws(as.character(lr_table$ligand))) &
+        !is.na(lr_table$receptor) & nzchar(trimws(as.character(lr_table$receptor))) &
+        is.finite(lr_table$lr_potential) & lr_table$lr_potential > 0,
+        , drop = FALSE
+    ]
+    if (nrow(lr_table) == 0L) {
+        graphics::plot.new(); graphics::title(main = title)
+        graphics::text(0.5, 0.5, "No positive finite LR pairs passed the filters")
+        return(invisible(NULL))
+    }
+    if (is.null(common_max)) common_max <- max(lr_table$lr_potential, na.rm = TRUE)
+    if (!is.finite(common_max) || common_max <= 0) stop("common_max must be positive and finite.")
+    chord_data <- data.frame(
+        from = paste0("Ligand: ", lr_table$ligand),
+        to = paste0("Receptor: ", lr_table$receptor),
+        value = lr_table$lr_potential, stringsAsFactors = FALSE
+    )
+    ligand_nodes <- unique(chord_data$from); receptor_nodes <- unique(chord_data$to)
+    node_order <- c(ligand_nodes, receptor_nodes)
+    grid_colours <- c(
+        stats::setNames(rep(ligand_color, length(ligand_nodes)), ligand_nodes),
+        stats::setNames(rep(receptor_color, length(receptor_nodes)), receptor_nodes)
+    )
+    edge_alpha <- 0.25 + 0.60 * pmin(lr_table$lr_potential / common_max, 1)
+    link_colours <- vapply(edge_alpha, function(a) {
+        grDevices::adjustcolor(ligand_color, alpha.f = a)
+    }, character(1))
+    circlize::circos.clear()
+    on.exit(circlize::circos.clear(), add = TRUE)
+    circlize::circos.par(
+        start.degree = 90,
+        gap.after = c(rep(2, max(length(ligand_nodes) - 1, 0)), 8,
+                      rep(2, max(length(receptor_nodes) - 1, 0)), 8),
+        track.margin = c(0.005, 0.005), points.overflow.warning = FALSE
+    )
+    circlize::chordDiagram(
+        x = chord_data, order = node_order, grid.col = grid_colours,
+        col = link_colours, transparency = 0, annotationTrack = "grid",
+        preAllocateTracks = list(track.height = 0.14), directional = 1,
+        direction.type = c("arrows", "diffHeight"), diffHeight = -0.03,
+        link.arr.type = "big.arrow", link.sort = TRUE, link.largest.ontop = TRUE,
+        reduce = -1
+    )
+    circlize::circos.trackPlotRegion(
+        track.index = 1, bg.border = NA,
+        panel.fun = function(x, y) {
+            sector_name <- circlize::get.cell.meta.data("sector.index")
+            xlim <- circlize::get.cell.meta.data("xlim")
+            ylim <- circlize::get.cell.meta.data("ylim")
+            label <- sub("^(Ligand|Receptor): ", "", sector_name)
+            circlize::circos.text(
+                mean(xlim), ylim[1] + 0.1, label, facing = "clockwise",
+                niceFacing = TRUE, adj = c(0, 0.5), cex = label_cex
+            )
+        }
+    )
+    graphics::title(main = title, line = -1)
+    invisible(list(
+        chord_data = chord_data, node_colours = grid_colours,
+        link_colours = link_colours, common_max = common_max
+    ))
+}
+
+
+#' Plot a GO-enrichment heatmap for NicheNet gene groups
+#'
+#' @param gobp_result GO result data frame with Cluster, Description, p.adjust,
+#'   and preferably Count.
+#' @param column_order Character vector of displayed group columns.
+#' @param selection_column Optional column whose non-missing rows define terms.
+#' @param number_terms_per_group Positive integer fallback term count per group.
+#' @param heatmap_name,legend_title Character heatmap and legend titles.
+#' @param row_font_size,column_font_size Positive label font sizes.
+#' @param cluster_rows,cluster_columns Logical clustering controls.
+#' @param draw_heatmap Logical scalar; whether to draw immediately.
+#' @return Invisibly returns the ComplexHeatmap object, plotted matrix,
+#'   selected long table, and colour limit. A matrix value of zero denotes a
+#'   group-term combination absent from the supplied significant results.
+#' @export
+plot_nichenet_gobp_heatmap <- function(
+    gobp_result,
+    column_order = c("MHCIIhi", "MHCIIlo"),
+    selection_column = "Plot.or.not",
+    number_terms_per_group = 12,
+    heatmap_name = "GO_FDR",
+    legend_title = "-log10(FDR)",
+    row_font_size = 11,
+    column_font_size = 11,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    draw_heatmap = TRUE
+) {
+    `%>%` <- dplyr::`%>%`
+    required <- c("Cluster", "Description", "p.adjust")
+    missing <- setdiff(required, colnames(gobp_result))
+    if (length(missing)) stop("gobp_result is missing: ", paste(missing, collapse = ", "))
+    if (nrow(gobp_result) == 0L) stop("gobp_result contains no enriched GO terms.")
+    plotting_table <- gobp_result %>% dplyr::filter(
+        !is.na(Cluster), !is.na(Description), !is.na(p.adjust), is.finite(p.adjust)
+    )
+    if (selection_column %in% colnames(plotting_table) &&
+        any(!is.na(plotting_table[[selection_column]]))) {
+        plotting_table <- plotting_table %>%
+            dplyr::filter(!is.na(.data[[selection_column]]))
+    } else {
+        if (!"Count" %in% colnames(plotting_table)) plotting_table$Count <- 0
+        selected <- plotting_table %>% dplyr::group_by(Cluster) %>%
+            dplyr::arrange(p.adjust, dplyr::desc(Count), .by_group = TRUE) %>%
+            dplyr::slice_head(n = number_terms_per_group) %>%
+            dplyr::ungroup() %>% dplyr::pull(Description) %>% unique()
+        plotting_table <- plotting_table %>% dplyr::filter(Description %in% selected)
+    }
+    if (nrow(plotting_table) == 0L) stop("No GO terms remain after selection.")
+    plotting_table <- plotting_table %>%
+        dplyr::mutate(logFDR = -log10(pmax(p.adjust, 1e-300)))
+    heatmap_matrix <- plotting_table %>%
+        dplyr::select(Cluster, Description, logFDR) %>%
+        tidyr::pivot_wider(
+            names_from = Cluster, values_from = logFDR,
+            values_fill = 0, values_fn = max
+        ) %>% tibble::column_to_rownames("Description") %>% as.matrix()
+    missing_groups <- setdiff(column_order, colnames(heatmap_matrix))
+    if (length(missing_groups)) {
+        heatmap_matrix <- cbind(heatmap_matrix, matrix(
+            0, nrow(heatmap_matrix), length(missing_groups),
+            dimnames = list(rownames(heatmap_matrix), missing_groups)
+        ))
+    }
+    heatmap_matrix <- heatmap_matrix[, column_order, drop = FALSE]
+    group_max <- max.col(heatmap_matrix, ties.method = "first")
+    score_max <- apply(heatmap_matrix, 1, max)
+    heatmap_matrix <- heatmap_matrix[
+        order(group_max, -score_max, rownames(heatmap_matrix)), , drop = FALSE
+    ]
+    colour_limit <- max(as.numeric(stats::quantile(
+        heatmap_matrix, 0.98, na.rm = TRUE
+    )), 1)
+    heatmap <- ComplexHeatmap::Heatmap(
+        heatmap_matrix, name = heatmap_name,
+        heatmap_legend_param = list(title = legend_title),
+        col = circlize::colorRamp2(
+            seq(0, colour_limit, length.out = 8),
+            c("#F7FCFD", "#E0ECF4", "#BFD3E6", "#9EBCDA",
+              "#8C96C6", "#8C6BB1", "#88419D", "#810F7C")
+        ),
+        cluster_rows = cluster_rows, cluster_columns = cluster_columns,
+        show_row_names = TRUE, show_column_names = TRUE,
+        row_names_gp = grid::gpar(fontsize = row_font_size),
+        column_names_gp = grid::gpar(fontsize = column_font_size),
+        row_names_max_width = ComplexHeatmap::max_text_width(rownames(heatmap_matrix)),
+        border = FALSE
+    )
+    if (isTRUE(draw_heatmap)) {
+        ComplexHeatmap::draw(heatmap, heatmap_legend_side = "right")
+    }
+    invisible(list(
+        heatmap = heatmap, matrix = heatmap_matrix,
+        plotting_table = plotting_table, colour_limit = colour_limit
+    ))
+}
+
+
+#' Save a NicheNet GO heatmap to a graphics file
+#'
+#' @param heatmap_result List returned by [plot_nichenet_gobp_heatmap()].
+#' @param filename Output path ending in PDF, PNG, TIF, or TIFF.
+#' @param width,height Positive device dimensions in inches.
+#' @param dpi Positive raster resolution for PNG/TIFF.
+#' @param heatmap_legend_side ComplexHeatmap legend position.
+#' @param background Device background colour.
+#' @return Invisibly returns the normalized output path after drawing and
+#'   closing the graphics device.
+#' @export
+save_nichenet_gobp_heatmap <- function(
+    heatmap_result,
+    filename,
+    width = 8,
+    height = 9,
+    dpi = 300,
+    heatmap_legend_side = "right",
+    background = "white"
+) {
+    if (is.null(heatmap_result$heatmap)) {
+        stop("heatmap_result must contain a $heatmap element.")
+    }
+    dimensions <- c(width, height, dpi)
+    if (any(!is.finite(dimensions)) || any(dimensions <= 0)) {
+        stop("width, height, and dpi must be positive finite values.")
+    }
+    output_directory <- dirname(filename)
+    if (output_directory != "." && !dir.exists(output_directory)) {
+        dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+    }
+    extension <- tolower(tools::file_ext(filename))
+    if (extension == "pdf") {
+        grDevices::pdf(filename, width = width, height = height,
+                       useDingbats = FALSE, bg = background)
+    } else if (extension == "png") {
+        grDevices::png(
+            filename, width = width, height = height, units = "in", res = dpi,
+            bg = background,
+            type = if (capabilities("cairo")) "cairo" else getOption("bitmapType", "Xlib")
+        )
+    } else if (extension %in% c("tif", "tiff")) {
+        grDevices::tiff(
+            filename, width = width, height = height, units = "in", res = dpi,
+            compression = "lzw", bg = background
+        )
+    } else stop("Supported extensions are PDF, PNG, TIF and TIFF.")
+    on.exit(grDevices::dev.off(), add = TRUE)
+    grid::grid.newpage()
+    ComplexHeatmap::draw(
+        heatmap_result$heatmap, heatmap_legend_side = heatmap_legend_side
+    )
+    invisible(normalizePath(filename, mustWork = FALSE))
 }
 
 

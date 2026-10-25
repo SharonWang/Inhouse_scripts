@@ -19,6 +19,15 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added eight R cell-communication and NicheNet utilities covering
+  condition-specific CellChat, population expression summaries, custom
+  ligand-receptor-target construction, circos/chord plots, GO enrichment,
+  GO heatmaps, and graphics export.
+- Added `LRT_RECEPTOR_MACARON_COLORS` as the reusable 16-colour receptor palette
+  supplied with the circos workflow.
+- Added complete Roxygen and README documentation for inputs, returned objects,
+  dependencies, ordering behavior, side effects, backgrounds, and cell-level
+  inference limitations.
 - Added the R `resolve_principal_node_names()` helper to normalize named and
   one-based numeric closest-vertex formats across Monocle versions, with strict
   validation and complete Roxygen and README documentation.
@@ -51,6 +60,12 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Selected the newest supplied `plot_lrt_circos()` implementation with
+  `lr_order_table` and exact sector-order safeguards; excluded its three
+  identical duplicate attachments and the distinct older implementation.
+- Made `calculate_expression_summary()` reusable by exposing its previously
+  implicit count and normalized-expression matrices as aligned parameters, and
+  namespaced/localized package dependencies in the new workflow.
 - Made `check_path()` reusable by exposing its previously implicit cell-type
   and genotype column names as validated parameters, and removed the duplicate
   continuous-colour scale from the supplied pseudotime plot.
