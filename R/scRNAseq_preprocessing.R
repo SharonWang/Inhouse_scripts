@@ -260,6 +260,75 @@ MONOCLE_PSEUDOTIME_COLORS <- grDevices::colorRampPalette(
 # =============================================================================
 
 
+#' Resolve Monocle closest-vertex values to principal-node names
+#'
+#' Normalize the output of Monocle closest-vertex mappings across versions.
+#' Values already matching graph vertex names such as `Y_1` are returned
+#' unchanged; otherwise strictly positive one-based integer indices are mapped
+#' to the supplied principal-node names.
+#'
+#' @param closest_vertex_values Vector of closest principal vertices returned
+#'   by Monocle. Numeric values are interpreted as one-based indices. Character
+#'   values are interpreted as graph-node names when all match; otherwise they
+#'   must all be digit-string one-based indices.
+#' @param principal_node_names Character vector of principal-graph vertex names
+#'   in the same order used by the numeric indices. Names must be non-missing,
+#'   non-empty, and unique.
+#'
+#' @return A character vector of resolved principal-node names with the same
+#'   length and order as `closest_vertex_values`. A zero-length input returns a
+#'   zero-length character vector. Inputs are not modified.
+#'
+#' @details Input type resolves ambiguity when graph nodes themselves have
+#'   numeric-looking names: numeric input always means indices, whereas a
+#'   character vector matching node names is preserved literally. Mixed name
+#'   and index representations are intentionally rejected.
+#' @export
+resolve_principal_node_names <- function(
+    closest_vertex_values,
+    principal_node_names
+) {
+    if (!is.character(principal_node_names) ||
+        anyNA(principal_node_names) ||
+        any(!nzchar(principal_node_names)) ||
+        anyDuplicated(principal_node_names)) {
+        stop("principal_node_names must contain unique, non-empty names.")
+    }
+
+    if (length(closest_vertex_values) == 0L) return(character())
+
+    if (is.numeric(closest_vertex_values)) {
+        if (anyNA(closest_vertex_values) || any(!is.finite(closest_vertex_values)) ||
+            any(closest_vertex_values != floor(closest_vertex_values)) ||
+            any(closest_vertex_values < 1) ||
+            any(closest_vertex_values > length(principal_node_names))) {
+            stop("Could not resolve Monocle principal-node indices.")
+        }
+        return(unname(principal_node_names[as.integer(closest_vertex_values)]))
+    }
+
+    closest_vertex_values <- as.character(closest_vertex_values)
+    if (anyNA(closest_vertex_values) || any(!nzchar(closest_vertex_values))) {
+        stop("closest_vertex_values contains missing or empty values.")
+    }
+
+    if (all(closest_vertex_values %in% principal_node_names)) {
+        return(closest_vertex_values)
+    }
+
+    if (any(!grepl("^[0-9]+$", closest_vertex_values))) {
+        stop("Could not resolve Monocle principal-node indices.")
+    }
+    vertex_indices <- suppressWarnings(as.integer(closest_vertex_values))
+    if (anyNA(vertex_indices) || any(vertex_indices < 1L) ||
+        any(vertex_indices > length(principal_node_names))) {
+        stop("Could not resolve Monocle principal-node indices.")
+    }
+
+    unname(principal_node_names[vertex_indices])
+}
+
+
 #' Select two rooted paths from a Monocle principal graph
 #'
 #' @param cds A Monocle3 `cell_data_set` with a learned UMAP principal graph.

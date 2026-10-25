@@ -410,6 +410,7 @@ and viridisLite in the functions that require them.
 
 | Workflow stage | Function | What it does | Main return value(s) |
 |---|---|---|---|
+| Monocle node mapping | `resolve_principal_node_names()` | Normalizes closest-vertex output returned as principal-node names or one-based indices. | Character vector of principal-node names. |
 | Monocle path selection | `get_two_monocle_paths()` | Finds two ordered shortest paths from one root to two principal-graph endpoints. | Node paths, shared nodes, last shared node, and nested-path flag. |
 | Monocle path visualization | `plot_two_monocle_paths()` | Draws the shared trajectory trunk and two directional branches over a cell-type UMAP. | ggplot object. |
 | Monocle pseudotime visualization | `plot_two_monocle_paths_pseudotime()` | Overlays the selected paths on a continuously pseudotime-coloured UMAP. | ggplot object. |
@@ -455,6 +456,11 @@ Select two rooted principal-graph routes and visualize them over cell type or
 pseudotime:
 
 ```r
+resolved_nodes <- resolve_principal_node_names(
+  closest_vertex_values,
+  principal_node_names = igraph::V(monocle3::principal_graph(cds)[["UMAP"]])$name
+)
+
 paths <- get_two_monocle_paths(
   cds,
   root_node = "Y_1",
@@ -472,6 +478,11 @@ genotype_paths <- split_path_by_genotype(cds)
 nested within the other. Plotting functions validate principal-node names and
 coordinates and do not mutate the input object. The supplied cell-type and
 BuPu pseudotime colours are stored as reusable palettes.
+`resolve_principal_node_names()` supports the named and one-based numeric
+closest-vertex formats returned by different Monocle versions and rejects
+mixed, fractional, out-of-range, or otherwise ambiguous values.
+Numeric inputs are always interpreted as indices; character values that match
+node names are preserved before digit-string index fallback is considered.
 
 Test genes for nonlinear association with rooted pseudotime, optionally
 adjusting for sample identity as a fixed model term, then visualize fitted

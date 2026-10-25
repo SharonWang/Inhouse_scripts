@@ -19,6 +19,9 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added the R `resolve_principal_node_names()` helper to normalize named and
+  one-based numeric closest-vertex formats across Monocle versions, with strict
+  validation and complete Roxygen and README documentation.
 - Added nine R Monocle utilities for rooted two-path selection and plotting,
   genotype splitting, path QC, nonlinear pseudotime modelling, fitted-profile
   heatmaps, and compatible save/load checkpoints.
