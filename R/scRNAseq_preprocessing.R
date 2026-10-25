@@ -8643,335 +8643,476 @@ plot_bulk_tf_heatmap <- function(
 
 #' Build ligand-receptor-target links from a custom LR table
 #'
-#' @param lr_table Data frame containing ligand, receptor, and a numeric
-#'   ligand-receptor weight column. Input row order is retained, including
-#'   receptors shared across ligands.
-#' @param target_genes Character vector of receiver target genes eligible for
-#'   ligand-target selection.
-#' @param lt_matrix Numeric target-by-ligand matrix with unique target row names
-#'   and unique ligand column names.
-#' @param n_targets_per_ligand Positive integer maximum number of strongest
-#'   positive targets retained per ligand.
-#' @param lr_weight_column Character scalar naming the numeric LR weight column
-#'   in `lr_table`.
-#' @return A list containing ligand order, the retained ligand-receptor rows,
-#'   selected ligand-target links, target and receptor layout assignments, and
-#'   ligands without positive target predictions.
-#' @details Invalid LR rows stop with an error instead of being silently
-#'   removed. Ligands absent from `lt_matrix` keep their LR rows but cannot
-#'   receive predicted targets. Target assignment is used only for layout; all
-#'   selected ligand-target links remain in the returned table.
+#' @param lr_table Data frame containing ligand, receptor, and numeric LR score columns.
+#' @param AT2_target_genes Character vector of receiver target genes.
+#' @param ligand_target_matrix Numeric target-by-ligand NicheNet prior matrix.
+#' @param lr_score_col Character scalar naming the LR score column.
+#' @param n_target_candidates Positive integer number of top prior targets considered per ligand.
+#' @param n_targets_per_ligand Positive integer maximum retained targets per ligand.
+#' @param n_receptors_per_ligand NULL or a positive integer maximum retained receptors per ligand.
+#' @return A list containing retained ligands, weighted ligand-target and
+#'   ligand-receptor tables, target and receptor assignments, and the original
+#'   unmodified LR input table for provenance.
+#' @details This prioritization helper is not a statistical communication test; its links depend on the supplied LR scores and species-matched prior.
 #' @export
 build_lrt_from_custom_lr <- function(
   lr_table,
-  target_genes,
-  lt_matrix,
-  n_targets_per_ligand = 20,
-  lr_weight_column = "lr_potential"
+  AT2_target_genes,
+  ligand_target_matrix,
+  lr_score_col = "lr_potential",
+  n_target_candidates = 250,
+  n_targets_per_ligand = 5,
+  n_receptors_per_ligand = NULL
 ) {
 
-  # Validate inputs.
-  if (!is.data.frame(lr_table)) {
-    stop("lr_table must be a data frame.")
-  }
+  `%>%` <- dplyr::`%>%`
 
-  if (
-    !is.character(lr_weight_column) ||
-      length(lr_weight_column) != 1L ||
-      is.na(lr_weight_column) ||
-      !nzchar(lr_weight_column)
-  ) {
-    stop("lr_weight_column must be a non-empty character scalar.")
-  }
+  ## ------------------------------------------------------------
+  ## 1. Validate input
+  ## ------------------------------------------------------------
 
-  required_columns <- c(
+  required_lr_columns <- c(
     "ligand",
     "receptor",
-    lr_weight_column
+    lr_score_col
   )
 
-  missing_columns <- setdiff(
-    required_columns,
+  missing_lr_columns <- setdiff(
+    required_lr_columns,
     colnames(lr_table)
   )
 
-  if (length(missing_columns) > 0) {
+  if (length(missing_lr_columns) > 0) {
     stop(
-      "Missing LR columns: ",
-      paste(missing_columns, collapse = ", ")
+      "lr_table is missing: ",
+      paste(
+        missing_lr_columns,
+        collapse = ", "
+      )
     )
   }
 
-  if (
-    length(n_targets_per_ligand) != 1L ||
-    !is.numeric(n_targets_per_ligand) ||
-    !is.finite(n_targets_per_ligand) ||
-    n_targets_per_ligand < 1 ||
-    n_targets_per_ligand != floor(n_targets_per_ligand)
-  ) {
-    stop("n_targets_per_ligand must be a positive integer.")
+  if (nrow(lr_table) == 0) {
+    stop("lr_table contains no ligand-receptor pairs.")
   }
 
-  if (
-    !is.character(target_genes) ||
-      length(target_genes) == 0L ||
-      anyNA(target_genes) ||
-      any(!nzchar(trimws(target_genes))) ||
-      any(target_genes != trimws(target_genes))
-  ) {
-    stop(
-      "target_genes must be a non-empty character vector containing ",
-      "non-missing, non-blank, trimmed gene names."
-    )
+  if (length(AT2_target_genes) == 0) {
+    stop("AT2_target_genes is empty.")
   }
 
-  target_genes <- unique(target_genes)
-
-  if (!is.matrix(lt_matrix) || !is.numeric(lt_matrix)) {
-    stop("lt_matrix must be a two-dimensional numeric matrix.")
-  }
-
-  if (any(!is.finite(lt_matrix))) {
-    stop("lt_matrix contains missing or non-finite ligand-target weights.")
-  }
-
-  if (
-    is.null(rownames(lt_matrix)) ||
-    is.null(colnames(lt_matrix)) ||
-    anyNA(rownames(lt_matrix)) ||
-    anyNA(colnames(lt_matrix)) ||
-    any(!nzchar(rownames(lt_matrix))) ||
-    any(!nzchar(colnames(lt_matrix)))
-  ) {
-    stop(
-      "lt_matrix must have target genes as row names ",
-      "and ligands as column names."
-    )
-  }
-
-  if (
-    anyDuplicated(rownames(lt_matrix)) ||
-    anyDuplicated(colnames(lt_matrix))
-  ) {
-    stop("lt_matrix contains duplicated row or column names.")
-  }
-
-  # Preserve input LR order and retain shared receptors.
-  ligand_receptor_links <- data.frame(
-    ligand = as.character(lr_table$ligand),
-    receptor = as.character(lr_table$receptor),
-    weight = lr_table[[lr_weight_column]],
-    stringsAsFactors = FALSE
+  positive_integer_arguments <- list(
+    n_target_candidates = n_target_candidates,
+    n_targets_per_ligand = n_targets_per_ligand
   )
 
-  if (!is.numeric(ligand_receptor_links$weight)) {
-    stop("The LR weight column must be numeric.")
+  for (argument_name in names(positive_integer_arguments)) {
+    argument_value <- positive_integer_arguments[[argument_name]]
+
+    if (
+      length(argument_value) != 1 ||
+        !is.numeric(argument_value) ||
+        !is.finite(argument_value) ||
+        argument_value < 1 ||
+        argument_value != as.integer(argument_value)
+    ) {
+      stop(argument_name, " must be a positive integer.")
+    }
   }
 
-  valid_lr <- with(
-    ligand_receptor_links,
-    !is.na(ligand) &
-      nzchar(trimws(ligand)) &
-      !is.na(receptor) &
-      nzchar(trimws(receptor)) &
-      is.finite(weight) &
+  if (
+    !is.null(n_receptors_per_ligand) &&
+      (
+        length(n_receptors_per_ligand) != 1 ||
+          !is.numeric(n_receptors_per_ligand) ||
+          !is.finite(n_receptors_per_ligand) ||
+          n_receptors_per_ligand < 1 ||
+          n_receptors_per_ligand != as.integer(n_receptors_per_ligand)
+      )
+  ) {
+    stop("n_receptors_per_ligand must be NULL or a positive integer.")
+  }
+
+  if (
+    is.null(rownames(ligand_target_matrix)) ||
+      is.null(colnames(ligand_target_matrix))
+  ) {
+    stop(
+      "ligand_target_matrix must have gene row names ",
+      "and ligand column names."
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 2. Prepare the custom ligand-receptor links
+  ##
+  ## Here, weight is your expression-based lr_potential.
+  ## ------------------------------------------------------------
+
+  ligand_receptor_links <- lr_table %>%
+    dplyr::transmute(
+      ligand = as.character(ligand),
+      receptor = as.character(receptor),
+      weight = as.numeric(
+        .data[[lr_score_col]]
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(ligand),
+      !is.na(receptor),
+      !is.na(weight),
+      is.finite(weight),
       weight > 0
-  )
-
-  if (any(!valid_lr)) {
-    stop(
-      sum(!valid_lr),
-      " LR rows contain missing gene names or ",
-      "non-positive/non-finite weights. ",
-      "Please check these rows before plotting."
+    ) %>%
+    dplyr::group_by(
+      ligand,
+      receptor
+    ) %>%
+    dplyr::summarise(
+      weight = max(
+        weight,
+        na.rm = TRUE
+      ),
+      .groups = "drop"
     )
-  }
 
   if (nrow(ligand_receptor_links) == 0) {
-    stop("The input LR table is empty.")
-  }
-
-  # Ligand order matches first appearance in the LR table,
-  # as in plot_lr_chord().
-  ligands <- unique(ligand_receptor_links$ligand)
-
-  targets_available <- intersect(
-    target_genes,
-    rownames(lt_matrix)
-  )
-
-  if (length(targets_available) == 0) {
-    stop("No target genes overlap with the ligand–target matrix.")
-  }
-
-  missing_ligands <- setdiff(
-    ligands,
-    colnames(lt_matrix)
-  )
-
-  if (length(missing_ligands) > 0) {
-    message(
-      "Keeping LR pairs, but no target predictions are available for: ",
-      paste(missing_ligands, collapse = ", ")
+    stop(
+      "No positive finite ligand-receptor ",
+      "weights remain."
     )
   }
 
-  # Extract the strongest positive target predictions per ligand.
-  target_tables <- lapply(
-    ligands,
+  ## Optionally limit the number of receptors per ligand.
+  ## NULL retains every LR pair supplied in lr_table.
+
+  if (!is.null(n_receptors_per_ligand)) {
+
+    ligand_receptor_links <-
+      ligand_receptor_links %>%
+      dplyr::group_by(ligand) %>%
+      dplyr::slice_max(
+        order_by = weight,
+        n = n_receptors_per_ligand,
+        with_ties = FALSE
+      ) %>%
+      dplyr::ungroup()
+  }
+
+  ## ------------------------------------------------------------
+  ## 3. Rank ligands by their strongest custom LR potential
+  ## ------------------------------------------------------------
+
+  ligand_scores <- ligand_receptor_links %>%
+    dplyr::group_by(ligand) %>%
+    dplyr::summarise(
+      ligand_lr_score = max(
+        weight,
+        na.rm = TRUE
+      ),
+      n_receptors = dplyr::n_distinct(
+        receptor
+      ),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(
+      dplyr::desc(ligand_lr_score),
+      dplyr::desc(n_receptors),
+      ligand
+    )
+
+  ligand_order <- ligand_scores %>%
+    dplyr::pull(ligand)
+
+  ## Only ligands represented in the NicheNet
+  ## ligand-target matrix can receive predicted targets.
+
+  ligands_in_target_matrix <- intersect(
+    ligand_order,
+    colnames(ligand_target_matrix)
+  )
+
+  dropped_from_target_matrix <- setdiff(
+    ligand_order,
+    ligands_in_target_matrix
+  )
+
+  if (length(dropped_from_target_matrix) > 0) {
+    message(
+      "Dropping ligands absent from ligand_target_matrix: ",
+      paste(
+        dropped_from_target_matrix,
+        collapse = ", "
+      )
+    )
+  }
+
+  if (length(ligands_in_target_matrix) == 0) {
+    stop(
+      "None of the selected LR ligands are present ",
+      "in ligand_target_matrix."
+    )
+  }
+
+  ## Restrict the receiver target set to genes represented
+  ## in the NicheNet ligand-target matrix.
+
+  target_genes_use <- intersect(
+    unique(
+      as.character(
+        AT2_target_genes
+      )
+    ),
+    rownames(ligand_target_matrix)
+  )
+
+  if (length(target_genes_use) == 0) {
+    stop(
+      "None of AT2_target_genes are represented ",
+      "in ligand_target_matrix."
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 4. Get NicheNet downstream targets for each selected ligand
+  ## ------------------------------------------------------------
+
+  ligand_target_links <- purrr::map_dfr(
+    ligands_in_target_matrix,
     function(ligand_i) {
 
-      empty_table <- data.frame(
-        ligand = character(),
-        target = character(),
-        weight = numeric(),
-        stringsAsFactors = FALSE
-      )
-
-      if (!ligand_i %in% colnames(lt_matrix)) {
-        return(empty_table)
-      }
-
-      target_weights <- as.numeric(
-        lt_matrix[
-          targets_available,
-          ligand_i,
-          drop = FALSE
-        ]
-      )
-
-      links <- data.frame(
+      nichenetr::get_weighted_ligand_target_links(
         ligand = ligand_i,
-        target = targets_available,
-        weight = target_weights,
-        stringsAsFactors = FALSE
-      )
-
-      links <- links[
-        is.finite(links$weight) & links$weight > 0,
-        ,
-        drop = FALSE
-      ]
-
-      if (nrow(links) == 0) {
-        return(empty_table)
-      }
-
-      links <- links[
-        order(-links$weight, links$target),
-        ,
-        drop = FALSE
-      ]
-
-      utils::head(
-        links,
-        n = n_targets_per_ligand
+        geneset = target_genes_use,
+        ligand_target_matrix =
+          ligand_target_matrix,
+        n = n_target_candidates
       )
     }
-  )
-
-  ligand_target_links <- do.call(
-    rbind,
-    target_tables
-  )
-
-  rownames(ligand_target_links) <- NULL
-
-  # Assign each target to its strongest selected ligand.
-  # This is a layout assignment; all retained LT links remain.
-  if (nrow(ligand_target_links) > 0) {
-
-    assignment_order <- order(
-      -ligand_target_links$weight,
-      match(ligand_target_links$ligand, ligands),
-      ligand_target_links$target
-    )
-
-    ordered_links <- ligand_target_links[
-      assignment_order,
-      ,
-      drop = FALSE
-    ]
-
-    strongest_links <- ordered_links[
-      !duplicated(ordered_links$target),
-      ,
-      drop = FALSE
-    ]
-
-    target_assignment <- data.frame(
-      target = strongest_links$target,
-      assigned_ligand = strongest_links$ligand,
-      stringsAsFactors = FALSE
-    )
-
-    target_assignment <- target_assignment[
-      order(
-        match(target_assignment$assigned_ligand, ligands),
-        match(
-          target_assignment$target,
-          ligand_target_links$target
-        )
+  ) %>%
+    dplyr::filter(
+      !is.na(ligand),
+      !is.na(target),
+      !is.na(weight),
+      is.finite(weight),
+      weight > 0
+    ) %>%
+    dplyr::group_by(
+      ligand,
+      target
+    ) %>%
+    dplyr::summarise(
+      weight = max(
+        weight,
+        na.rm = TRUE
       ),
-      ,
-      drop = FALSE
-    ]
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(ligand) %>%
+    dplyr::slice_max(
+      order_by = weight,
+      n = n_targets_per_ligand,
+      with_ties = FALSE
+    ) %>%
+    dplyr::ungroup()
 
-  } else {
-
-    target_assignment <- data.frame(
-      target = character(),
-      assigned_ligand = character(),
-      stringsAsFactors = FALSE
-    )
-
-    warning(
-      "No positive ligand–target predictions were found. ",
-      "All supplied LR pairs have still been retained."
+  if (nrow(ligand_target_links) == 0) {
+    stop(
+      "No positive ligand-target links were found."
     )
   }
 
-  # Keep one assignment for every supplied LR row.
-  # A shared receptor can therefore appear under several ligands.
-  receptor_assignment <- data.frame(
-    receptor = ligand_receptor_links$receptor,
-    assigned_ligand = ligand_receptor_links$ligand,
-    weight = ligand_receptor_links$weight,
-    stringsAsFactors = FALSE
+  ## ------------------------------------------------------------
+  ## 5. Retain ligands having both LR and target links
+  ## ------------------------------------------------------------
+
+  ligands_with_receptors <- unique(
+    ligand_receptor_links$ligand
   )
 
-  ligands_without_targets <- setdiff(
-    ligands,
-    unique(ligand_target_links$ligand)
+  ligands_with_targets <- unique(
+    ligand_target_links$ligand
   )
 
-  rownames(target_assignment) <- NULL
-  rownames(receptor_assignment) <- NULL
+  usable_ligands <- ligand_order[
+    ligand_order %in%
+      intersect(
+        ligands_with_receptors,
+        ligands_with_targets
+      )
+  ]
+
+  if (length(usable_ligands) == 0) {
+    stop(
+      "No selected ligand has both receptor ",
+      "and downstream-target links."
+    )
+  }
+
+  dropped_ligands <- setdiff(
+    ligand_order,
+    usable_ligands
+  )
+
+  if (length(dropped_ligands) > 0) {
+    message(
+      "Dropping ligands without both link types: ",
+      paste(
+        dropped_ligands,
+        collapse = ", "
+      )
+    )
+  }
+
+  ligand_receptor_links <-
+    ligand_receptor_links %>%
+    dplyr::filter(
+      ligand %in% usable_ligands
+    ) %>%
+    dplyr::mutate(
+      ligand = factor(
+        ligand,
+        levels = usable_ligands
+      )
+    ) %>%
+    dplyr::arrange(
+      ligand,
+      dplyr::desc(weight)
+    ) %>%
+    dplyr::mutate(
+      ligand = as.character(ligand)
+    )
+
+  ligand_target_links <-
+    ligand_target_links %>%
+    dplyr::filter(
+      ligand %in% usable_ligands
+    ) %>%
+    dplyr::mutate(
+      ligand = factor(
+        ligand,
+        levels = usable_ligands
+      )
+    ) %>%
+    dplyr::arrange(
+      ligand,
+      dplyr::desc(weight)
+    ) %>%
+    dplyr::mutate(
+      ligand = as.character(ligand)
+    )
+
+  ## ------------------------------------------------------------
+  ## 6. Assign target sectors for the circos layout
+  ##
+  ## A target linked to multiple ligands is placed under the
+  ## ligand with the highest regulatory-potential weight.
+  ## All ligand-target links remain in ligand_target_links.
+  ## ------------------------------------------------------------
+
+  target_assignment <- ligand_target_links %>%
+    dplyr::group_by(target) %>%
+    dplyr::arrange(
+      dplyr::desc(weight),
+      match(
+        ligand,
+        usable_ligands
+      ),
+      .by_group = TRUE
+    ) %>%
+    dplyr::slice_head(
+      n = 1
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::transmute(
+      target,
+      assigned_ligand = ligand
+    )
+
+  ## ------------------------------------------------------------
+  ## 7. Assign receptor sectors
+  ##
+  ## The same receptor may be retained for several ligands.
+  ## This preserves the actual custom LR pairs.
+  ## ------------------------------------------------------------
+
+  receptor_assignment <- ligand_receptor_links %>%
+    dplyr::transmute(
+      receptor,
+      assigned_ligand = ligand,
+      weight
+    ) %>%
+    dplyr::distinct(
+      assigned_ligand,
+      receptor,
+      .keep_all = TRUE
+    )
+
+  ## ------------------------------------------------------------
+  ## 8. Diagnostic messages
+  ## ------------------------------------------------------------
 
   message(
-    "Retained LR rows: ",
-    nrow(ligand_receptor_links),
-    "; ligands: ",
-    length(ligands),
-    "; unique receptors: ",
-    length(unique(ligand_receptor_links$receptor))
+    "Usable ligands: ",
+    length(usable_ligands)
   )
 
   message(
-    "Ligand–target links: ",
-    nrow(ligand_target_links),
-    "; up to ",
-    n_targets_per_ligand,
-    " targets per ligand."
+    "Custom ligand-receptor pairs: ",
+    nrow(ligand_receptor_links)
   )
+
+  message(
+    "Predicted ligand-target links: ",
+    nrow(ligand_target_links)
+  )
+
+  message(
+    "Unique receptors: ",
+    dplyr::n_distinct(
+      ligand_receptor_links$receptor
+    )
+  )
+
+  message(
+    "Unique target genes: ",
+    dplyr::n_distinct(
+      ligand_target_links$target
+    )
+  )
+
+  ligands_without_assigned_targets <- setdiff(
+    usable_ligands,
+    unique(
+      target_assignment$assigned_ligand
+    )
+  )
+
+  if (
+    length(ligands_without_assigned_targets) > 0
+  ) {
+    message(
+      "These ligands have target links but no uniquely ",
+      "assigned target sector: ",
+      paste(
+        ligands_without_assigned_targets,
+        collapse = ", "
+      )
+    )
+  }
+
+  ## ------------------------------------------------------------
+  ## 9. Return object compatible with plot_lrt_circos()
+  ## ------------------------------------------------------------
 
   list(
-    ligands = ligands,
-    ligand_receptor = ligand_receptor_links,
+    ligands = usable_ligands,
     ligand_target = ligand_target_links,
+    ligand_receptor = ligand_receptor_links,
     target_assignment = target_assignment,
     receptor_assignment = receptor_assignment,
-    ligands_without_targets = ligands_without_targets
+    ligand_scores = ligand_scores,
+    lr_input = lr_table,
+    lr_score_name = lr_score_col
   )
 }
 
@@ -8994,13 +9135,8 @@ build_lrt_from_custom_lr <- function(
 #' @param target_line_lwd,ligand_line_lwd,receptor_line_lwd Positive guide-line widths.
 #' @param target_border_lwd Positive target-sector border width.
 #' @param ligand_label_colour,target_label_colour,receptor_label_colour Valid label colours.
-#' @return Invisibly returns visualization inputs, links, ordering, assignments,
-#'   resolved colours, sector metadata, and `omitted_lr_only_ligands` that
-#'   could not be drawn because they had no selected ligand-target links.
-#' @details Draws on the active graphics device and clears circlize state on
-#'   exit. A circos plot requires at least one selected ligand-target link;
-#'   retained LR-only ligands remain in `lrt_result` and are reported but are
-#'   not representable in this ligand-target anchored layout.
+#' @return Invisibly returns visualization inputs, links, ordering, assignments, resolved colours, and sector metadata.
+#' @details Draws on the active graphics device and clears circlize state on exit.
 #' @export
 plot_lrt_circos <- function(
   lrt_result,
@@ -9063,11 +9199,7 @@ plot_lrt_circos <- function(
   }
 
   if (nrow(lrt_result$ligand_target) == 0) {
-    stop(
-      "No ligand-target links are present, so the circos layout cannot be ",
-      "drawn. Retained ligand-receptor rows remain available in ",
-      "lrt_result$ligand_receptor."
-    )
+    stop("No ligand-target links are present.")
   }
 
   if (nrow(lrt_result$ligand_receptor) == 0) {
@@ -9324,20 +9456,6 @@ plot_lrt_circos <- function(
   retained_ligands <- unique(
     circos_links$ligand
   )
-
-  omitted_lr_only_ligands <- setdiff(
-    unique(receptor_assignments$assigned_ligand),
-    retained_ligands
-  )
-
-  if (length(omitted_lr_only_ligands) > 0) {
-    warning(
-      "The following retained LR-only ligands have no selected targets and ",
-      "cannot be drawn in the ligand-target anchored circos layout: ",
-      paste(omitted_lr_only_ligands, collapse = ", "),
-      ". Their LR rows remain in lrt_result$ligand_receptor."
-    )
-  }
 
   ligand_order <- unique(
     c(
@@ -10704,7 +10822,6 @@ plot_lrt_circos <- function(
         target_receptor_assignment,
       target_gene_colours = target_gene_colours,
       receptor_gene_colours = receptor_gene_colours,
-      omitted_lr_only_ligands = omitted_lr_only_ligands,
       target_sectors = target_sector_order,
       ligand_sectors = ligand_sector_order
     )

@@ -60,17 +60,10 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
-- Replaced the existing `build_lrt_from_custom_lr()` with the newer supplied
-  implementation after identifying the duplicate function name. The updated
-  function preserves valid LR input rows and shared receptors in source order,
-  selects positive targets directly from the supplied ligand-target matrix,
-  uses strict validation, and reports ligands without target predictions.
-- Added explicit circos reporting for retained LR-only ligands that cannot be
-  drawn without selected target sectors, including a returned omission list
-  and an explanatory all-LR/no-target error.
-- Made `target_genes` and `lt_matrix` explicit required parameters instead of
-  relying on global-object defaults, and updated the README signature, return
-  contract, validation behavior, and usage example accordingly.
+- Restored `build_lrt_from_custom_lr()` to the implementation that preceded
+  commit `c8e1c49`, including its original documented arguments, prioritization
+  behavior, returned provenance fields, and matching README example, at the
+  user's request.
 - Selected the newest supplied `plot_lrt_circos()` implementation with
   `lr_order_table` and exact sector-order safeguards; excluded its three
   identical duplicate attachments and the distinct older implementation.
