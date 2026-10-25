@@ -165,6 +165,58 @@ SIGNED_MANHATTAN_MACARON_COLORS <- c(
 )
 
 
+#' Macaron palette for paired bulk-expression plots
+#'
+#' Six muted colours supplied with [plot_bulk_paired_expression()].
+#'
+#' @return A character vector containing six hexadecimal colour values.
+BULK_PAIRED_EXPRESSION_COLORS <- c(
+    "#E8B4B8", "#B8C7E0", "#B9D8C2",
+    "#F3C77F", "#D6B8D8", "#AFCFD3"
+)
+
+
+#' Diverging palettes for bulk activity and expression heatmaps
+#'
+#' `BULK_SIGNALING_DIVERGING_COLORS` stores the supplied blue, white, and
+#' muted-red anchors. `BULK_ACTIVITY_DIVERGING_COLORS` expands those anchors to
+#' 100 colours for TF, gene-expression, comparison, and signaling heatmaps.
+#'
+#' @return Character vectors containing three and 100 hexadecimal colours,
+#'   respectively.
+BULK_SIGNALING_DIVERGING_COLORS <- c("#8199C1", "#FFFFFF", "#D68188")
+
+BULK_ACTIVITY_DIVERGING_COLORS <- grDevices::colorRampPalette(
+    BULK_SIGNALING_DIVERGING_COLORS
+)(100)
+
+
+#' Sequential palette for NicheNet ligand-activity heatmaps
+#'
+#' A 100-colour white-to-purple gradient for corrected AUPR scores.
+#'
+#' @return A character vector containing 100 hexadecimal colour values.
+BULK_NICHENET_ACTIVITY_COLORS <- grDevices::colorRampPalette(
+    c("#FFFFFF", "#B4B9D9", "#59348A")
+)(100)
+
+
+#' Sender and connectivity palettes for NicheNet plots
+#'
+#' Named sender-population colours and binary absent/present link colours used
+#' by [plot_bulk_nichenet_lr_connectivity()].
+#'
+#' @return `BULK_NICHENET_SENDER_COLORS` is a named three-colour vector;
+#'   `BULK_NICHENET_CONNECTIVITY_COLORS` is a two-colour vector.
+BULK_NICHENET_SENDER_COLORS <- c(
+    pATM = "#D9A6A6",
+    cATM = "#AFC8B8",
+    sATM = "#B8B3D8"
+)
+
+BULK_NICHENET_CONNECTIVITY_COLORS <- c("#F5F5F5", "#8199C1")
+
+
 # =============================================================================
 # Data loading and import
 # =============================================================================
@@ -831,7 +883,6 @@ read_featurecounts_project <- function(
 
     result
 }
-
 
 # =============================================================================
 # Quality control and filtering
@@ -5095,7 +5146,7 @@ plot_gene_set_heatmap <- function(
     if (!is.null(save)) {
         save_heatmap <- function() {
             if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
-                grDevices::cairo_pdf(filename = save, width = width, height = height)
+                grDevices::cairo_pdf(filename = if (is.null(save)) NA else save, width = width, height = height)
             } else {
                 grDevices::png(
                     filename = save,
@@ -6015,7 +6066,7 @@ plot_de_heatmap <- function(
     if (!is.null(save)) {
         save_heatmap <- function() {
             if (grepl("\\.pdf$", save, ignore.case = TRUE)) {
-                grDevices::cairo_pdf(filename = save, width = width, height = height)
+                grDevices::cairo_pdf(filename = if (is.null(save)) NA else save, width = width, height = height)
             } else {
                 grDevices::png(
                     filename = save,
@@ -6905,5 +6956,4047 @@ plot_signed_manhattan <- function(
         fdr_cutoff = fdr_cutoff,
         logfc_cutoff = logfc_cutoff,
         cap_y = cap_y
+    )
+}
+
+
+# =============================================================================
+# Sample-level TF activity and differential activity for bulk RNA-seq
+# =============================================================================
+# Requires: edgeR, decoupleR, limma; statmod for robust limma moderation.
+# No package installation, network downloads or file writes occur on source().
+# References:
+# https://saezlab.github.io/decoupleR/reference/run_ulm.html
+# https://saezlab.github.io/decoupleR/articles/tf_bk.html
+#
+# Intended input: prepare_bulk_expression() output (logCPM, metadata, genes, dge).
+# Scores use one shared gene universe and network across the selected samples.
+# Gene filtering subsets the existing normalized logCPM; it does not renormalize.
+# ULM enrichment p-values are not differential-activity p-values.
+
+
+#' Infer sample-level TF activity from prepared bulk expression
+#'
+#' @param bulk List with logCPM, metadata and genes; dge is needed for filtering.
+#' @param network Signed TF-target data frame, e.g. mouse/human CollecTRI.
+#' @param group_cols Metadata columns defining groups for filterByExpr.
+#'   For factorial experiments use all biological grouping columns.
+#' @param gene_col Gene-symbol column of bulk$genes; NULL uses gene row names.
+#' @param source_col,target_col,weight_col Network column names.
+#' @param filter_genes Use edgeR::filterByExpr on the supplied dge.
+#' @param min_count,min_total_count Passed to edgeR::filterByExpr.
+#' @param duplicate_genes Keep highest mean-logCPM row per symbol, or stop.
+#' @param center Center each gene across ALL selected samples before scoring.
+#'   FALSE follows the direct normalized-expression workflow. TRUE produces
+#'   relative activities; use one fixed centering reference for all comparisons.
+#' @param min_targets Minimum distinct measured targets per regulator.
+#' @param verbose Print processing counts.
+#' @return List containing activity_matrix (TF x sample), activity_long,
+#'   metadata, network, coverage, logCPM, gene_map, QC and provenance.
+#' @export
+infer_bulk_tf_activity <- function(
+    bulk,
+    network,
+    group_cols = NULL,
+    gene_col = "gene_name",
+    source_col = "source",
+    target_col = "target",
+    weight_col = "mor",
+    filter_genes = TRUE,
+    min_count = 10,
+    min_total_count = 15,
+    duplicate_genes = c("highest_mean", "error"),
+    center = FALSE,
+    min_targets = 10L,
+    verbose = TRUE
+) {
+    # ------------------------------------------------------------
+    # Dependencies and input checks
+    # ------------------------------------------------------------
+    if (!requireNamespace("decoupleR", quietly = TRUE)) {
+        stop("decoupleR is required.", call. = FALSE)
+    }
+    duplicate_genes <- match.arg(duplicate_genes)
+    for (value in list(filter_genes, center, verbose)) {
+        if (!is.logical(value) || length(value) != 1L || is.na(value)) {
+            stop("filter_genes, center and verbose must be logical scalars.")
+        }
+    }
+    if (!is.numeric(min_targets) || length(min_targets) != 1L ||
+        !is.finite(min_targets) || min_targets < 2 || min_targets != floor(min_targets)) {
+        stop("min_targets must be an integer >= 2.")
+    }
+    for (value in list(min_count, min_total_count)) {
+        if (!is.numeric(value) || length(value) != 1L ||
+            !is.finite(value) || value < 0) stop("Count thresholds must be >= 0.")
+    }
+    if (!is.list(bulk) || !all(c("logCPM", "metadata", "genes") %in% names(bulk))) {
+        stop("bulk must contain logCPM, metadata and genes.")
+    }
+    mat <- as.matrix(bulk$logCPM)
+    meta <- as.data.frame(bulk$metadata)
+    anno <- as.data.frame(bulk$genes)
+    if (!is.numeric(mat) || nrow(mat) < 3L || ncol(mat) < 3L ||
+        any(!is.finite(mat))) stop("logCPM must be finite and numeric, with >=3 genes/samples.")
+    if (is.null(rownames(mat)) || is.null(colnames(mat)) ||
+        anyNA(rownames(mat)) || anyNA(colnames(mat)) ||
+        any(rownames(mat) == "") || any(colnames(mat) == "") ||
+        anyDuplicated(rownames(mat)) || anyDuplicated(colnames(mat))) {
+        stop("logCPM must have unique, nonmissing gene and sample names.")
+    }
+    if (anyDuplicated(rownames(meta)) || anyDuplicated(rownames(anno)) ||
+        !setequal(colnames(mat), rownames(meta)) ||
+        !setequal(rownames(mat), rownames(anno))) {
+        stop("Expression, metadata and annotation identifiers do not match uniquely.")
+    }
+    meta <- meta[colnames(mat), , drop = FALSE]
+    anno <- anno[rownames(mat), , drop = FALSE]
+    n_input <- nrow(mat)
+
+    # ------------------------------------------------------------
+    # One shared expression filter across all samples
+    # ------------------------------------------------------------
+    keep <- rep(TRUE, nrow(mat))
+    names(keep) <- rownames(mat)
+    if (filter_genes) {
+        if (!requireNamespace("edgeR", quietly = TRUE)) stop("edgeR is required.")
+        if (is.null(bulk$dge) || !inherits(bulk$dge, "DGEList")) {
+            stop("Filtering requires bulk$dge as an edgeR DGEList.")
+        }
+        if (is.null(group_cols) || !is.character(group_cols) ||
+            !length(group_cols) || anyNA(group_cols) ||
+            anyDuplicated(group_cols) || !all(group_cols %in% colnames(meta))) {
+            stop("Provide valid group_cols for expression filtering.")
+        }
+        group_df <- meta[, group_cols, drop = FALSE]
+        if (anyNA(group_df)) stop("Filtering group columns contain missing values.")
+        if (any(vapply(group_df, function(x) any(trimws(as.character(x)) == ""), logical(1)))) {
+            stop("Filtering group columns contain blank values.")
+        }
+        # Integer codes avoid collisions when group labels contain separators.
+        filter_group <- do.call(interaction, c(lapply(group_df, function(x) as.integer(factor(x))),
+                                               list(drop = TRUE, lex.order = TRUE)))
+        dge <- bulk$dge
+        if (!identical(rownames(dge), rownames(mat)) ||
+            !identical(colnames(dge), colnames(mat))) {
+            stop("bulk$dge and logCPM must have identical gene/sample order.")
+        }
+        keep <- edgeR::filterByExpr(dge, group = filter_group,
+                                    min.count = min_count,
+                                    min.total.count = min_total_count)
+        names(keep) <- rownames(mat)
+        if (!any(keep)) stop("No genes passed expression filtering.")
+    }
+    mat <- mat[keep, , drop = FALSE]
+    anno <- anno[rownames(mat), , drop = FALSE]
+    n_filtered <- nrow(mat)
+
+    # ------------------------------------------------------------
+    # Map to unique gene symbols without selecting by significance
+    # ------------------------------------------------------------
+    if (is.null(gene_col)) {
+        symbols <- rownames(mat)
+    } else {
+        if (!is.character(gene_col) || length(gene_col) != 1L ||
+            is.na(gene_col) || !gene_col %in% colnames(anno)) {
+            stop("gene_col is absent from bulk$genes.")
+        }
+        symbols <- trimws(as.character(anno[[gene_col]]))
+    }
+    valid <- !is.na(symbols) & nzchar(symbols)
+    gene_map <- data.frame(GeneID = rownames(mat), Symbol = symbols,
+                           MeanLogCPM = rowMeans(mat), stringsAsFactors = FALSE)
+    gene_map <- gene_map[valid, , drop = FALSE]
+    n_annotated <- nrow(gene_map)
+    if (!n_annotated) stop("No valid gene symbols remain.")
+    if (duplicate_genes == "error" && anyDuplicated(gene_map$Symbol)) {
+        stop("Duplicated gene symbols; use duplicate_genes='highest_mean' or resolve manually.")
+    }
+    gene_map <- gene_map[order(-gene_map$MeanLogCPM, gene_map$GeneID), , drop = FALSE]
+    gene_map <- gene_map[!duplicated(gene_map$Symbol), , drop = FALSE]
+    mat <- mat[gene_map$GeneID, , drop = FALSE]
+    rownames(mat) <- gene_map$Symbol
+    if (nrow(mat) < 3L) stop("Too few uniquely annotated genes for ULM.")
+
+    # ------------------------------------------------------------
+    # Validate network and measure regulon coverage
+    # ------------------------------------------------------------
+    net_cols <- c(source_col, target_col, weight_col)
+    if (!is.data.frame(network) || length(net_cols) != 3L ||
+        anyNA(net_cols) || anyDuplicated(net_cols) ||
+        !all(net_cols %in% colnames(network))) stop("Invalid network columns.")
+    raw_weight <- network[[weight_col]]
+    if (!is.numeric(raw_weight)) stop("Network weights must be numeric.")
+    net <- data.frame(source = trimws(as.character(network[[source_col]])),
+                      target = trimws(as.character(network[[target_col]])),
+                      mor = raw_weight, stringsAsFactors = FALSE)
+    if (anyNA(net) || any(!is.finite(net$mor)) ||
+        any(net$source == "") || any(net$target == "")) {
+        stop("Network contains missing/blank identifiers or nonfinite weights.")
+    }
+    net <- unique(net[net$mor != 0, , drop = FALSE])
+    if (!nrow(net)) stop("No nonzero network edges.")
+    if (anyDuplicated(net[c("source", "target")])) {
+        stop("Conflicting weights for a TF-target pair; resolve before scoring.")
+    }
+    tf_names <- unique(net$source)
+    coverage <- data.frame(
+        TF = tf_names,
+        Targets_network = as.integer(table(factor(net$source, levels = tf_names))),
+        Targets_measured = as.integer(table(factor(
+            net$source[net$target %in% rownames(mat)], levels = tf_names))),
+        stringsAsFactors = FALSE
+    )
+    coverage$Coverage_fraction <- coverage$Targets_measured / coverage$Targets_network
+    coverage$Eligible <- coverage$Targets_measured >= min_targets
+    if (!any(coverage$Eligible)) {
+        stop("No TF has sufficient targets. Check species, gene symbols and filtering.")
+    }
+    net_used <- net[net$source %in% coverage$TF[coverage$Eligible] &
+                    net$target %in% rownames(mat), , drop = FALSE]
+
+    # ------------------------------------------------------------
+    # Infer all samples using the SAME matrix background and network
+    # ------------------------------------------------------------
+    scoring_mat <- if (center) sweep(mat, 1L, rowMeans(mat), "-") else mat
+    if (any(apply(scoring_mat, 2L, stats::sd) == 0)) {
+        stop("A sample has no expression variation after preprocessing.")
+    }
+    acts <- as.data.frame(decoupleR::run_ulm(
+        mat = scoring_mat, network = net_used,
+        .source = "source", .target = "target", .mor = "mor",
+        center = FALSE, minsize = as.integer(min_targets)
+    ))
+    if (!all(c("source", "condition", "score", "p_value") %in% names(acts)) ||
+        any(!is.finite(acts$score))) stop("ULM returned invalid scores.")
+    acts$source <- as.character(acts$source)
+    acts$condition <- as.character(acts$condition)
+    eligible_tfs <- coverage$TF[coverage$Eligible]
+    if (!setequal(acts$source, eligible_tfs) ||
+        !setequal(acts$condition, colnames(mat)) ||
+        anyDuplicated(acts[c("source", "condition")]) ||
+        nrow(acts) != length(eligible_tfs) * ncol(mat)) {
+        stop("ULM did not return one score for every eligible TF/sample pair.")
+    }
+    activity_matrix <- matrix(NA_real_, length(eligible_tfs), ncol(mat),
+                              dimnames = list(eligible_tfs, colnames(mat)))
+    index <- cbind(match(acts$source, eligible_tfs), match(acts$condition, colnames(mat)))
+    activity_matrix[index] <- acts$score
+    activity_long <- data.frame(TF = acts$source, Sample = acts$condition,
+                                Activity = acts$score, ULM_PValue = acts$p_value)
+    qc <- data.frame(Input_genes = n_input, Filtered_genes = n_filtered,
+                      Annotated_rows = n_annotated, Unique_symbols = nrow(mat),
+                      Duplicate_symbols_removed = n_annotated - nrow(mat),
+                      Genes_matching_network = sum(rownames(mat) %in% net$target),
+                      TFs_scored = nrow(activity_matrix), Samples = ncol(mat))
+    if (verbose) {
+        message("\n====================================")
+        message("Sample-level TF activity complete")
+        message("====================================")
+        print(qc, row.names = FALSE)
+    }
+    result <- list(
+        method = "ULM", activity_matrix = activity_matrix,
+        activity_long = activity_long, metadata = meta,
+        coverage = coverage, network = net, network_used = net_used,
+        logCPM = mat, gene_map = gene_map, keep_genes = keep, qc = qc,
+        settings = list(group_cols = group_cols, gene_col = gene_col,
+                         filter_genes = filter_genes, min_count = min_count,
+                         min_total_count = min_total_count,
+                         duplicate_genes = duplicate_genes,
+                         center = center, min_targets = min_targets,
+                         normalization = bulk$normalization),
+        session = utils::sessionInfo()
+    )
+    class(result) <- c("bulk_tf_activity", "list")
+    result
+}
+
+
+#' Test differential activity between two groups using limma
+#'
+#' Positive DeltaActivity means higher activity in group2 than group1.
+#' Scores are continuous activities, so coefficients are NOT log fold changes.
+#' @param tf Output from infer_bulk_tf_activity.
+#' @param group_col,group1,group2 Metadata group column, reference and comparison.
+#' @param subset Optional expression evaluated in metadata and caller scope.
+#' @param covariates Character vector of batch/other adjustment columns.
+#' @param block_col Verified subject-ID column for duplicateCorrelation.
+#' @param robust,trend Passed to limma::eBayes; trend=FALSE is the default.
+#' @param fdr_cutoff BH FDR threshold for Direction annotation.
+#' @param delta_cutoff Additional descriptive effect threshold; this does not
+#'   change the null hypothesis of the limma test (zero activity difference).
+#' @param verbose Logical scalar. Whether to report sample counts, tested TFs,
+#'   excluded constant TFs, and the number passing the FDR cutoff.
+#' @return results, fitted model, design, contrast, selected metadata, dropped
+#'   constant TFs, groups, sample counts, covariates and block correlation.
+#' @export
+limma_tf_pairwise <- function(
+    tf,
+    group_col,
+    group1,
+    group2,
+    subset = NULL,
+    covariates = NULL,
+    block_col = NULL,
+    robust = TRUE,
+    trend = FALSE,
+    fdr_cutoff = 0.05,
+    delta_cutoff = 0,
+    verbose = TRUE
+) {
+    if (!requireNamespace("limma", quietly = TRUE)) stop("limma is required.")
+    if (!is.list(tf) || !all(c("activity_matrix", "metadata") %in% names(tf))) {
+        stop("tf must contain activity_matrix and metadata.")
+    }
+    for (value in list(robust, trend, verbose)) {
+        if (!is.logical(value) || length(value) != 1L || is.na(value)) {
+            stop("robust, trend and verbose must be logical scalars.")
+        }
+    }
+    if (robust && !requireNamespace("statmod", quietly = TRUE)) {
+        stop("statmod is required when robust=TRUE.")
+    }
+    if (!is.numeric(fdr_cutoff) || length(fdr_cutoff) != 1L ||
+        !is.finite(fdr_cutoff) || fdr_cutoff < 0 || fdr_cutoff > 1) stop("Invalid fdr_cutoff.")
+    if (!is.numeric(delta_cutoff) || length(delta_cutoff) != 1L ||
+        !is.finite(delta_cutoff) || delta_cutoff < 0) stop("Invalid delta_cutoff.")
+    for (value in list(group_col, group1, group2)) {
+        if (length(value) != 1L || is.na(value) || !nzchar(as.character(value))) {
+            stop("Group column and labels must be nonmissing scalars.")
+        }
+    }
+    group_col <- as.character(group_col)
+    group1 <- as.character(group1)
+    group2 <- as.character(group2)
+    if (group1 == group2) stop("group1 and group2 must differ.")
+    meta <- as.data.frame(tf$metadata)
+    mat <- as.matrix(tf$activity_matrix)
+    if (!is.numeric(mat) || any(!is.finite(mat)) ||
+        is.null(rownames(mat)) || is.null(colnames(mat)) ||
+        anyDuplicated(rownames(mat)) || anyDuplicated(colnames(mat)) ||
+        anyDuplicated(rownames(meta)) || !setequal(colnames(mat), rownames(meta))) {
+        stop("Activity matrix and metadata must be finite, unique and aligned.")
+    }
+    meta <- meta[colnames(mat), , drop = FALSE]
+    if (!group_col %in% names(meta)) stop("group_col is absent from metadata.")
+    subset_expr <- substitute(subset)
+    selected <- rep(TRUE, nrow(meta))
+    if (!identical(subset_expr, quote(NULL))) {
+        selected <- eval(subset_expr, envir = meta, enclos = parent.frame())
+        if (!is.logical(selected) || length(selected) != nrow(meta) || anyNA(selected)) {
+            stop("subset must return one nonmissing logical value per sample.")
+        }
+    }
+    group_values <- as.character(meta[[group_col]])
+    selected <- selected & !is.na(group_values) & group_values %in% c(group1, group2)
+    meta <- meta[selected, , drop = FALSE]
+    mat <- mat[, rownames(meta), drop = FALSE]
+    group_values <- as.character(meta[[group_col]])
+    n1 <- sum(group_values == group1)
+    n2 <- sum(group_values == group2)
+    if (min(n1, n2) < 2L) stop("At least two biological samples per group are required.")
+
+    # ------------------------------------------------------------
+    # Build model; internal covariate names also support spaces in metadata names
+    # ------------------------------------------------------------
+    if (!is.null(covariates) && (!is.character(covariates) || anyNA(covariates) ||
+        anyDuplicated(covariates) || !all(covariates %in% names(meta)))) {
+        stop("Invalid covariate columns.")
+    }
+    if (group_col %in% covariates) stop("Do not include group_col as a covariate.")
+    model_data <- data.frame(.group = factor(
+        ifelse(group_values == group1, "reference", "comparison"),
+        levels = c("reference", "comparison")), row.names = rownames(meta))
+    internal_covariates <- character()
+    for (i in seq_along(covariates)) {
+        value <- meta[[covariates[i]]]
+        if (anyNA(value)) stop("Missing covariate values: ", covariates[i])
+        if (is.character(value) || is.factor(value) || is.logical(value)) {
+            if (any(trimws(as.character(value)) == "")) stop("Blank covariate values.")
+            value <- droplevels(factor(value))
+        } else if (!is.numeric(value) || any(!is.finite(value))) {
+            stop("Covariates must be finite numeric or categorical columns.")
+        }
+        if (length(unique(value)) < 2L) {
+            stop("Covariate is constant in selected samples: ", covariates[i],
+                 ". Omit it from this comparison.")
+        }
+        nm <- paste0(".covariate", i)
+        model_data[[nm]] <- value
+        internal_covariates <- c(internal_covariates, nm)
+    }
+    design <- stats::model.matrix(
+        stats::reformulate(c(".group", internal_covariates)), data = model_data
+    )
+    if (qr(design)$rank < ncol(design)) {
+        stop("Design is rank deficient: check group/batch confounding.")
+    }
+    if (nrow(design) <= ncol(design)) stop("No residual degrees of freedom.")
+    comparison_coef <- match(".groupcomparison", colnames(design))
+    if (is.na(comparison_coef)) stop("Internal error: group coefficient not found.")
+    contrast <- matrix(0, ncol(design), 1L,
+                        dimnames = list(colnames(design), paste0(group2, "_vs_", group1)))
+    contrast[comparison_coef, 1L] <- 1
+    variable <- apply(mat, 1L, stats::sd) > 0
+    dropped_tfs <- rownames(mat)[!variable]
+    mat <- mat[variable, , drop = FALSE]
+    if (nrow(mat) < 2L) stop("Fewer than two variable TFs remain for limma moderation.")
+
+    # ------------------------------------------------------------
+    # Optional repeated-subject correlation
+    # ------------------------------------------------------------
+    block <- NULL
+    correlation <- NULL
+    if (!is.null(block_col)) {
+        if (!is.character(block_col) || length(block_col) != 1L ||
+            is.na(block_col) || !block_col %in% names(meta)) stop("Invalid block_col.")
+        if (block_col %in% covariates) stop("Do not model the same column as covariate and block.")
+        value <- as.character(meta[[block_col]])
+        if (anyNA(value) || any(trimws(value) == "")) stop("Missing/blank subject IDs.")
+        block <- factor(value)
+        if (sum(table(block) >= 2L) < 2L) stop("At least two repeated subjects are required.")
+        if (nrow(design) < ncol(design) + 2L) {
+            stop("duplicateCorrelation requires at least two residual degrees of freedom.")
+        }
+        if (!requireNamespace("statmod", quietly = TRUE)) stop("statmod is required for blocking.")
+        correlation <- limma::duplicateCorrelation(mat, design, block = block)$consensus.correlation
+        if (!is.finite(correlation)) stop("Could not estimate a finite block correlation.")
+        fit <- limma::lmFit(mat, design, block = block, correlation = correlation)
+    } else {
+        fit <- limma::lmFit(mat, design)
+    }
+    fit <- limma::contrasts.fit(fit, contrasts = contrast)
+    fit <- limma::eBayes(fit, robust = robust, trend = trend)
+    x <- limma::topTable(fit, coef = 1L, number = Inf, sort.by = "P")
+    results <- data.frame(TF = rownames(x), DeltaActivity = x$logFC,
+                          MeanActivity = x$AveExpr, t = x$t,
+                          PValue = x$P.Value, FDR = x$adj.P.Val, B = x$B,
+                          stringsAsFactors = FALSE)
+    rownames(results) <- results$TF
+    results$Direction <- "NS"
+    sig <- !is.na(results$FDR) & results$FDR < fdr_cutoff
+    results$Direction[sig & results$DeltaActivity > delta_cutoff] <- paste0("Up_", group2)
+    results$Direction[sig & results$DeltaActivity < -delta_cutoff] <- paste0("Up_", group1)
+    if (!is.null(tf$coverage)) {
+        coverage_cols <- c("Targets_network", "Targets_measured", "Coverage_fraction")
+        if (all(c("TF", coverage_cols) %in% names(tf$coverage))) {
+            results <- cbind(results, tf$coverage[
+                match(results$TF, tf$coverage$TF), coverage_cols, drop = FALSE])
+        }
+    }
+    if (verbose) {
+        message("\nComparison: ", group2, " vs ", group1)
+        message(group1, ": n = ", n1, "; ", group2, ": n = ", n2)
+        message("TFs tested: ", nrow(results))
+        message("Constant TFs excluded: ", length(dropped_tfs))
+        message("FDR < ", fdr_cutoff, ": ", sum(sig))
+    }
+    list(method = "limma_TF_activity", comparison = paste0(group2, "_vs_", group1),
+         results = results, fit = fit, design = design, contrast = contrast,
+         metadata = meta, activity_matrix = mat, dropped_tfs = dropped_tfs,
+         group1 = group1, group2 = group2, n_group1 = n1, n_group2 = n2,
+         covariates = covariates,
+         covariate_map = if (length(covariates) > 0L) {
+             stats::setNames(covariates, internal_covariates)
+         } else {
+             NULL
+         },
+         block_col = block_col, block_correlation = correlation,
+         thresholds = list(fdr_cutoff = fdr_cutoff, delta_cutoff = delta_cutoff),
+         session = utils::sessionInfo())
+}
+
+
+#' Plot all significant TFs with subtype/condition and significance annotations
+#'
+#' TFs are selected from de_results using the requested FDR column, regardless
+#' of direction. A subtype's row annotation is Yes if ANY of its comparisons
+#' passes that threshold. Scores, not DE coefficients, form the heatmap.
+#' Means are calculated on raw sample scores, then each TF is z-scored across
+#' the displayed columns. Columns remain in the requested biological order.
+#' Rows use either correlation distance 1-r or Euclidean distance.
+#' Distance is calculated from unclipped row z-scores; linkage is configurable.
+#'
+#' @param tf Output of infer_bulk_tf_activity.
+#' @param de_results Combined TF DE data frame, e.g. DE_TF_ATM_all.
+#' @param subtype_col,condition_col Metadata grouping columns.
+#' @param de_subtype_col Subtype column in de_results.
+#' @param subtype_order,condition_order Explicit orders; no missing groups allowed.
+#' @param subtype_colors,condition_colors Named annotation colour vectors.
+#' @param fdr_col,fdr_cutoff Significance criterion, e.g. FDR or FDR_global.
+#' @param column_mode "mean" for condition means or "samples" for all replicates.
+#' @param feature_label Character label used in the heatmap title.
+#' @param clustering_distance_rows Correlation (1-r) or Euclidean distance.
+#' @param clustering_method Linkage passed to hclust; average by default.
+#' @param correlation_method Pearson or Spearman correlation.
+#' @param color Vector of heatmap colours; any length >=2 is supported.
+#' @param z_limit Colour saturation threshold only; clustering uses unclipped data.
+#' @param fontsize_row,fontsize_col Label sizes.
+#' @param width,height Output dimensions in inches; NULL height adapts to TF count.
+#' @param save Optional PDF/PNG/TIFF filename, written by pheatmap.
+#' @return Plot, raw and z-score matrices, annotations, selected TFs, row tree,
+#'   per-group sample counts and dropped TFs with constant group means.
+#' @export
+plot_bulk_tf_heatmap <- function(
+    tf,
+    de_results,
+    subtype_col = "ATM_subtype",
+    condition_col = "Condition",
+    de_subtype_col = subtype_col,
+    subtype_order = c("pATM", "cATM", "sATM"),
+    condition_order = c("ND", "2W", "1M", "2M"),
+    subtype_colors,
+    condition_colors,
+    fdr_col = "FDR",
+    fdr_cutoff = 0.05,
+    column_mode = c("mean", "samples"),
+    feature_label = "TF activities",
+    clustering_distance_rows = c("correlation", "euclidean"),
+    clustering_method = "average",
+    correlation_method = c("pearson", "spearman"),
+    color = BULK_ACTIVITY_DIVERGING_COLORS,
+    z_limit = 2.5,
+    fontsize_row = 9,
+    fontsize_col = 10,
+    width = 9,
+    height = NULL,
+    save = NULL
+) {
+    if (!requireNamespace("pheatmap", quietly = TRUE)) stop("pheatmap is required.")
+    column_mode <- match.arg(column_mode)
+    if (!is.character(feature_label) || length(feature_label) != 1L ||
+        is.na(feature_label) || feature_label == "") stop("Invalid feature_label.")
+    clustering_distance_rows <- match.arg(clustering_distance_rows)
+    correlation_method <- match.arg(correlation_method)
+    allowed_linkages <- c("ward.D", "ward.D2", "single", "complete", "average",
+                          "mcquitty", "median", "centroid")
+    if (!is.character(clustering_method) || length(clustering_method) != 1L ||
+        is.na(clustering_method) || !clustering_method %in% allowed_linkages) {
+        stop("Invalid clustering_method for hclust.")
+    }
+    if (!is.character(color) || length(color) < 2L || anyNA(color)) {
+        stop("color must be a vector of at least two valid R colours.")
+    }
+    tryCatch(grDevices::col2rgb(color), error = function(e) {
+        stop("Invalid heatmap color: ", conditionMessage(e), call. = FALSE)
+    })
+    if (!is.list(tf) || !all(c("activity_matrix", "metadata") %in% names(tf))) {
+        stop("tf must contain activity_matrix and metadata.")
+    }
+    if (!is.data.frame(de_results) ||
+        !all(c("TF", de_subtype_col, fdr_col) %in% names(de_results))) {
+        stop("de_results must contain TF, subtype and requested FDR columns.")
+    }
+    if (!is.numeric(fdr_cutoff) || length(fdr_cutoff) != 1L ||
+        !is.finite(fdr_cutoff) || fdr_cutoff < 0 || fdr_cutoff > 1) stop("Invalid FDR cutoff.")
+    if (!is.numeric(z_limit) || length(z_limit) != 1L ||
+        !is.finite(z_limit) || z_limit <= 0) stop("z_limit must be positive.")
+    for (x in list(subtype_order, condition_order)) {
+        if (!is.character(x) || !length(x) || anyNA(x) ||
+            any(x == "") || anyDuplicated(x)) stop("Orders must contain unique nonblank labels.")
+    }
+    mat <- as.matrix(tf$activity_matrix)
+    meta <- as.data.frame(tf$metadata)
+    if (!is.numeric(mat) || any(!is.finite(mat)) ||
+        is.null(rownames(mat)) || is.null(colnames(mat)) ||
+        anyDuplicated(rownames(mat)) || anyDuplicated(colnames(mat)) ||
+        anyDuplicated(rownames(meta)) || !setequal(colnames(mat), rownames(meta))) {
+        stop("Activity matrix and metadata must have matching unique identifiers.")
+    }
+    meta <- meta[colnames(mat), , drop = FALSE]
+    if (!all(c(subtype_col, condition_col) %in% names(meta))) stop("Missing metadata columns.")
+    subtype <- as.character(meta[[subtype_col]])
+    condition <- as.character(meta[[condition_col]])
+    if (anyNA(subtype) || anyNA(condition)) stop("Missing subtype/condition labels.")
+    selected_samples <- subtype %in% subtype_order & condition %in% condition_order
+    meta <- meta[selected_samples, , drop = FALSE]
+    mat <- mat[, rownames(meta), drop = FALSE]
+    subtype <- as.character(meta[[subtype_col]])
+    condition <- as.character(meta[[condition_col]])
+    if (!ncol(mat)) stop("No samples match the requested groups.")
+    for (i in seq_along(subtype_order)) {
+        if (!subtype_order[i] %in% names(subtype_colors)) stop("Missing subtype colour.")
+    }
+    if (!all(condition_order %in% names(condition_colors))) stop("Missing condition colours.")
+
+    # ------------------------------------------------------------
+    # Union of all significant up/down TFs across comparisons
+    # ------------------------------------------------------------
+    fdr <- de_results[[fdr_col]]
+    if (!is.numeric(fdr) || any(!is.na(fdr) & (!is.finite(fdr) | fdr < 0 | fdr > 1))) {
+        stop("The FDR column must be numeric, with values between zero and one.")
+    }
+    sig <- de_results[!is.na(fdr) & fdr < fdr_cutoff &
+                       de_results[[de_subtype_col]] %in% subtype_order, , drop = FALSE]
+    selected_tfs <- unique(as.character(sig$TF))
+    if (!length(selected_tfs)) stop("No significant TFs at this cutoff.")
+    if (anyNA(selected_tfs) || any(selected_tfs == "")) stop("Invalid significant TF names.")
+    if (!all(selected_tfs %in% rownames(mat))) stop("Significant TFs are absent from the score matrix.")
+    mat <- mat[selected_tfs, , drop = FALSE]
+
+    # ------------------------------------------------------------
+    # Build columns in subtype-major, condition-minor order
+    # ------------------------------------------------------------
+    pieces <- list()
+    column_annotations <- list()
+    counts <- list()
+    for (ct in subtype_order) {
+        for (cond in condition_order) {
+            ids <- rownames(meta)[subtype == ct & condition == cond]
+            if (!length(ids)) stop("Missing group: ", ct, " / ", cond)
+            tag <- paste(ct, cond, sep = "__")
+            counts[[tag]] <- data.frame(Subtype = ct, Condition = cond, N = length(ids))
+            if (column_mode == "mean") {
+                block <- matrix(rowMeans(mat[, ids, drop = FALSE]), ncol = 1L,
+                                dimnames = list(rownames(mat), tag))
+            } else {
+                block <- mat[, ids, drop = FALSE]
+            }
+            pieces[[tag]] <- block
+            column_annotations[[tag]] <- data.frame(
+                Subtype = rep(ct, ncol(block)), Condition = rep(cond, ncol(block)),
+                row.names = colnames(block), stringsAsFactors = FALSE
+            )
+        }
+    }
+    raw <- do.call(cbind, pieces)
+    annotation_col <- do.call(rbind, unname(column_annotations))
+    annotation_col <- annotation_col[colnames(raw), , drop = FALSE]
+    names(annotation_col)[1] <- subtype_col
+    annotation_col[[subtype_col]] <- factor(annotation_col[[subtype_col]], levels = subtype_order)
+    annotation_col$Condition <- factor(annotation_col$Condition, levels = condition_order)
+
+    row_sd <- apply(raw, 1L, stats::sd)
+    dropped_tfs <- rownames(raw)[!is.finite(row_sd) | row_sd == 0]
+    if (length(dropped_tfs)) {
+        warning("Constant displayed profiles omitted: ", paste(dropped_tfs, collapse = ", "))
+        raw <- raw[!rownames(raw) %in% dropped_tfs, , drop = FALSE]
+    }
+    if (!nrow(raw)) stop("No variable significant TF profiles remain.")
+    z <- sweep(sweep(raw, 1L, rowMeans(raw), "-"), 1L, apply(raw, 1L, stats::sd), "/")
+
+    # ------------------------------------------------------------
+    # Independent row bars: a TF may be significant in several subtypes
+    # ------------------------------------------------------------
+    annotation_row <- data.frame(row.names = rownames(raw))
+    annotation_colors <- list()
+    annotation_colors[[subtype_col]] <- subtype_colors[subtype_order]
+    annotation_colors$Condition <- condition_colors[condition_order]
+    for (ct in subtype_order) {
+        tf_ct <- as.character(sig$TF[sig[[de_subtype_col]] == ct])
+        nm <- paste0("Sig_", ct)
+        annotation_row[[nm]] <- factor(ifelse(rownames(raw) %in% tf_ct, "Yes", "No"),
+                                      levels = c("No", "Yes"))
+        annotation_colors[[nm]] <- c(No = "#F0F0F0", Yes = unname(subtype_colors[ct]))
+    }
+    tree <- FALSE
+    if (nrow(z) > 1L) {
+        if (clustering_distance_rows == "correlation") {
+            r <- stats::cor(t(z), method = correlation_method)
+            if (any(!is.finite(r))) stop("Nonfinite row correlations.")
+            distance <- 1 - r
+            distance[distance < 0] <- 0
+            diag(distance) <- 0
+            row_distance <- stats::as.dist(distance)
+        } else {
+            row_distance <- stats::dist(z, method = "euclidean")
+        }
+        tree <- stats::hclust(row_distance, method = clustering_method)
+    }
+    displayed <- z
+    displayed[displayed > z_limit] <- z_limit
+    displayed[displayed < -z_limit] <- -z_limit
+    group_sizes <- as.integer(table(factor(annotation_col[[subtype_col]], levels = subtype_order)))
+    gaps_col <- head(cumsum(group_sizes), -1L)
+    if (is.null(height)) height <- max(5, 2.3 + 0.16 * nrow(raw))
+    labels_col <- as.character(annotation_col$Condition)
+    if (column_mode == "samples") {
+        labels_col <- paste(labels_col, ave(seq_len(ncol(raw)),
+                           interaction(annotation_col[[subtype_col]], annotation_col$Condition),
+                           FUN = seq_along), sep = "_")
+    }
+    args <- list(
+        mat = displayed, scale = "none", cluster_rows = tree, cluster_cols = FALSE,
+        annotation_row = annotation_row, annotation_col = annotation_col,
+        annotation_colors = annotation_colors, drop_levels = FALSE,
+        color = color,
+        breaks = seq(-z_limit, z_limit, length.out = length(color) + 1L), border_color = NA,
+        labels_col = labels_col, gaps_col = gaps_col,
+        fontsize_row = fontsize_row, fontsize_col = fontsize_col,
+        angle_col = "45", treeheight_row = 45,
+        main = paste0("Significant ", feature_label, ": ", fdr_col, " < ", fdr_cutoff,
+                       "\n", if (column_mode == "mean") "Condition means" else "Individual samples",
+                       "; row z-score"),
+        legend_breaks = c(-z_limit, 0, z_limit),
+        legend_labels = c(paste0("<= -", z_limit), "0", paste0(">= ", z_limit)),
+        silent = TRUE
+    )
+    if (!is.null(save)) {
+        if (!is.character(save) || length(save) != 1L || is.na(save) || save == "") {
+            stop("save must be a filename or NULL.")
+        }
+        if (!dir.exists(dirname(save))) dir.create(dirname(save), recursive = TRUE)
+        args$filename <- save
+        args$width <- width
+        args$height <- height
+    }
+    plot <- do.call(pheatmap::pheatmap, args)
+    grid::grid.newpage()
+    grid::grid.draw(plot$gtable)
+    list(plot = plot, raw_matrix = raw, z_matrix = z,
+         annotation_row = annotation_row, annotation_col = annotation_col,
+         significant_tfs = selected_tfs, plotted_tfs = rownames(raw),
+         dropped_tfs = dropped_tfs, row_tree = tree,
+         sample_counts = do.call(rbind, unname(counts)),
+         settings = list(fdr_col = fdr_col, fdr_cutoff = fdr_cutoff,
+                          column_mode = column_mode, z_limit = z_limit,
+                          clustering_distance_rows = clustering_distance_rows,
+                          clustering_method = clustering_method,
+                          correlation_method = correlation_method,
+                          color = color))
+}
+
+
+# =============================================================================
+# Gene profiles, enrichment and condition-response analysis for bulk RNA-seq
+# =============================================================================
+
+#' Collect annotated edgeR comparisons with an explicit comparison manifest
+#' @param de_list Named list of single-coefficient edgeR pairwise results.
+#' @param stratum_col Metadata column identifying the analysed cell type;
+#'   NULL uses a single stratum called All.
+#' @param gene_col Annotation column containing symbols.
+#' @param analysis_col Name of the analysis-identifier column retained from
+#'   each result table when available.
+#' @param condition_col,reference_col Names used for the comparison and
+#'   reference-group fields in the collected output.
+#' @param gene_id_col Name used for the original stable gene-row identifier.
+#' @return table, comparison_info and QC. Duplicate symbols are resolved using
+#'   highest logCPM, independently of significance, separately in each contrast.
+#' @export
+prepare_bulk_gene_de <- function(
+    de_list, stratum_col = "ATM_subtype", gene_col = "gene_name",
+    analysis_col = "Analysis", condition_col = "ComparisonGroup",
+    reference_col = "Reference", gene_id_col = "GeneRowName"
+) {
+    # collect_edgeR_pairwise() retains contrast labels and gene identifiers,
+    # so saved unfiltered long tables do not require the original fitted objects.
+    # Sorting in that table is the first component of each analysis name.
+    if (is.data.frame(de_list)) {
+        long <- as.data.frame(de_list)
+        required <- c(analysis_col, condition_col, reference_col, gene_id_col,
+                      gene_col, "logFC", "logCPM", "F", "PValue", "FDR", stratum_col)
+        if (!all(required %in% names(long))) {
+            stop("Long DE table is missing: ",
+                 paste(setdiff(required, names(long)), collapse = ", "),
+                 ". collect_edgeR_pairwise() stores population labels in Sorting.")
+        }
+        if (!nrow(long)) stop("Long DE table is empty.")
+        label_cols <- c(analysis_col, condition_col, reference_col, gene_id_col, stratum_col)
+        for (column in label_cols) {
+            labels <- as.character(long[[column]])
+            if (anyNA(labels) || any(!nzchar(trimws(labels)))) {
+                stop("Missing or empty long-table identifiers in ", column)
+            }
+        }
+        analyses <- unique(as.character(long[[analysis_col]]))
+        de_list <- stats::setNames(vector("list", length(analyses)), analyses)
+        for (nm in analyses) {
+            x <- long[as.character(long[[analysis_col]]) == nm, , drop = FALSE]
+            single <- function(column) {
+                value <- unique(as.character(x[[column]]))
+                if (length(value) != 1L) stop("Inconsistent ", column, " within ", nm)
+                value
+            }
+            group1 <- single(reference_col)
+            group2 <- single(condition_col)
+            if (group1 == group2) stop("Reference equals comparison group in ", nm)
+            gene_ids <- as.character(x[[gene_id_col]])
+            if (anyDuplicated(gene_ids)) stop("Repeated gene IDs within ", nm)
+            rownames(x) <- gene_ids
+            metadata <- if (is.null(stratum_col)) NULL else
+                stats::setNames(data.frame(single(stratum_col), stringsAsFactors = FALSE), stratum_col)
+            # This temporary metadata contains contrast labels only, not samples.
+            de_list[[nm]] <- list(results = x, metadata = metadata,
+                                  group1 = group1, group2 = group2)
+        }
+    }
+    if (!is.list(de_list) || !length(de_list) || is.null(names(de_list)) ||
+        anyNA(names(de_list)) || any(names(de_list) == "") || anyDuplicated(names(de_list))) {
+        stop("de_list must be a nonempty, uniquely named list.")
+    }
+    tables <- infos <- qcs <- vector("list", length(de_list))
+    for (i in seq_along(de_list)) {
+        nm <- names(de_list)[i]
+        obj <- de_list[[i]]
+        x <- as.data.frame(obj$results)
+        needed <- c(gene_col, "logFC", "logCPM", "F", "PValue", "FDR")
+        if (!all(needed %in% names(x))) stop("Missing edgeR columns in ", nm)
+        if (!is.null(obj$test$df.test) && any(obj$test$df.test != 1)) {
+            stop("Directional enrichment requires one-coefficient contrasts: ", nm)
+        }
+        if (!all(vapply(x[c("logFC", "logCPM", "F", "PValue", "FDR")], is.numeric, logical(1)))) {
+            stop("edgeR statistics must be numeric: ", nm)
+        }
+        if (any(!is.finite(x$F)) || any(x$F < 0) ||
+            any(!is.finite(x$logFC)) || any(!is.finite(x$logCPM))) stop("Invalid statistics in ", nm)
+        for (p in c("PValue", "FDR")) {
+            if (any(!is.na(x[[p]]) & (!is.finite(x[[p]]) | x[[p]] < 0 | x[[p]] > 1))) {
+                stop("Invalid probabilities in ", nm)
+            }
+        }
+        if (length(obj$group1) != 1L || length(obj$group2) != 1L ||
+            anyNA(c(obj$group1, obj$group2))) stop("Missing group labels in ", nm)
+        if (is.null(stratum_col)) {
+            stratum <- "All"
+        } else {
+            if (is.null(obj$metadata) || !stratum_col %in% names(obj$metadata)) {
+                stop("Missing stratum metadata in ", nm)
+            }
+            stratum <- unique(as.character(obj$metadata[[stratum_col]]))
+            if (length(stratum) != 1L || anyNA(stratum) || stratum == "") {
+                stop("Each comparison must belong to exactly one stratum: ", nm)
+            }
+        }
+        n_tested <- nrow(x)
+        x$GeneID <- rownames(x)
+        x$Gene <- trimws(as.character(x[[gene_col]]))
+        x <- x[!is.na(x$Gene) & x$Gene != "", , drop = FALSE]
+        n_annotated <- nrow(x)
+        x <- x[order(-x$logCPM, x$GeneID), , drop = FALSE]
+        x <- x[!duplicated(x$Gene), , drop = FALSE]
+        if (!nrow(x)) stop("No annotated genes in ", nm)
+        x$ResultName <- nm
+        x$Subtype <- stratum
+        x$Condition <- as.character(obj$group2)
+        x$Reference <- as.character(obj$group1)
+        x$Comparison <- paste0(obj$group2, "_vs_", obj$group1)
+        rownames(x) <- NULL
+        tables[[i]] <- x
+        infos[[i]] <- data.frame(ResultName = nm, Subtype = stratum,
+                                Condition = as.character(obj$group2),
+                                Reference = as.character(obj$group1),
+                                Comparison = paste0(obj$group2, "_vs_", obj$group1))
+        qcs[[i]] <- data.frame(ResultName = nm, Tested_rows = n_tested,
+                               Annotated_rows = n_annotated, Unique_symbols = nrow(x),
+                               Duplicate_symbols_removed = n_annotated - nrow(x))
+    }
+    result <- list(table = do.call(rbind, tables), comparison_info = do.call(rbind, infos),
+                   qc = do.call(rbind, qcs), settings = list(gene_col = gene_col, stratum_col = stratum_col))
+    result$table$FDR_global <- stats::p.adjust(result$table$PValue, "BH")
+    class(result) <- c("bulk_gene_de", "list")
+    result
+}
+
+
+#' Gene-expression heatmap for the union of significant edgeR genes
+#' Uses all prepared logCPM rows, avoiding selection of expression rows by DE
+#' significance. Duplicate symbols use highest mean expression across samples.
+#' Requires plot_bulk_tf_heatmap from the shared helper, used internally as a
+#' general feature-matrix renderer. The displayed values are gene logCPM z-scores.
+#'
+#' @param bulk A prepared expression object returned by
+#'   [prepare_bulk_expression()].
+#' @param gene_de A collected differential-expression object returned by
+#'   [prepare_bulk_gene_de()].
+#' @param gene_col Gene-symbol column in `bulk$genes`.
+#' @param subtype_col,condition_col Metadata columns defining the row strata
+#'   and experimental conditions used in the display.
+#' @param subtype_order,condition_order Explicit biological display orders.
+#' @param subtype_colors,condition_colors Named colour vectors covering the
+#'   requested subtype and condition levels.
+#' @param fdr_col,fdr_cutoff Differential-expression significance column and
+#'   threshold used to form the union of displayed genes.
+#' @param column_mode Either `"mean"` for grouped means or `"samples"` for
+#'   individual biological samples.
+#' @param top_n `NULL` to retain the complete significant union or a positive
+#'   integer limiting genes by their best FDR across comparisons.
+#' @param ... Additional arguments forwarded to [plot_bulk_tf_heatmap()].
+#'
+#' @return A heatmap result list containing the plot, raw and z-score matrices,
+#'   annotations, selected/plotted/dropped genes, clustering information,
+#'   sample counts, settings, and the resolved `gene_map`.
+#' @export
+plot_bulk_gene_expression_heatmap <- function(
+    bulk, gene_de, gene_col = "gene_name",
+    subtype_col = "ATM_subtype", condition_col = "Condition",
+    subtype_order = c("pATM", "cATM", "sATM"),
+    condition_order = c("ND", "2W", "1M", "2M"),
+    subtype_colors, condition_colors, fdr_col = "FDR", fdr_cutoff = 0.05,
+    column_mode = "mean", top_n = NULL, ...
+) {
+    if (!all(c("logCPM", "genes", "metadata") %in% names(bulk)) ||
+        !is.list(gene_de) || !"table" %in% names(gene_de)) stop("Invalid prepared inputs.")
+    mat <- as.matrix(bulk$logCPM)
+    anno <- as.data.frame(bulk$genes)
+    if (!is.numeric(mat) || any(!is.finite(mat)) || is.null(rownames(mat)) ||
+        anyDuplicated(rownames(mat)) || !setequal(rownames(mat), rownames(anno)) ||
+        anyDuplicated(rownames(anno)) || !gene_col %in% names(anno)) stop("Invalid gene expression/annotation.")
+    anno <- anno[rownames(mat), , drop = FALSE]
+    symbols <- trimws(as.character(anno[[gene_col]]))
+    valid <- !is.na(symbols) & symbols != ""
+    map <- data.frame(GeneID = rownames(mat)[valid], Gene = symbols[valid],
+                       MeanLogCPM = rowMeans(mat)[valid])
+    map <- map[order(-map$MeanLogCPM, map$GeneID), , drop = FALSE]
+    map <- map[!duplicated(map$Gene), , drop = FALSE]
+    mat <- mat[map$GeneID, , drop = FALSE]
+    rownames(mat) <- map$Gene
+    de <- gene_de$table
+    if (!fdr_col %in% names(de)) stop("Missing requested FDR column.")
+    if (!is.null(top_n)) {
+        if (!is.numeric(top_n) || length(top_n) != 1L || !is.finite(top_n) ||
+            top_n < 1 || top_n != floor(top_n)) stop("Invalid top_n.")
+        eligible <- de[!is.na(de[[fdr_col]]) & de[[fdr_col]] < fdr_cutoff &
+                         de$Subtype %in% subtype_order, , drop = FALSE]
+        ids <- unique(eligible$Gene)
+        best <- vapply(ids, function(id) min(eligible[[fdr_col]][eligible$Gene == id]), numeric(1))
+        ids <- head(ids[order(best, ids)], top_n)
+        de <- de[de$Gene %in% ids, , drop = FALSE]
+    }
+    de$TF <- de$Gene
+    result <- plot_bulk_tf_heatmap(
+        tf = list(activity_matrix = mat, metadata = bulk$metadata),
+        de_results = de, subtype_col = subtype_col, condition_col = condition_col,
+        de_subtype_col = "Subtype", subtype_order = subtype_order,
+        condition_order = condition_order, subtype_colors = subtype_colors,
+        condition_colors = condition_colors, fdr_col = fdr_col,
+        fdr_cutoff = fdr_cutoff, column_mode = column_mode,
+        feature_label = "gene expression", ...
+    )
+    names(result)[names(result) == "significant_tfs"] <- "significant_genes"
+    names(result)[names(result) == "plotted_tfs"] <- "plotted_genes"
+    names(result)[names(result) == "dropped_tfs"] <- "dropped_genes"
+    result$gene_map <- map
+    result
+}
+
+
+#' GSEA and optional up/down ORA for every edgeR contrast
+#' @param gene_de Output of prepare_bulk_gene_de.
+#' @param OrgDb AnnotationDbi organism database; required for GO.
+#' @param TERM2GENE Optional two-column custom term-to-SYMBOL mapping. When
+#'   supplied, use generic GSEA/enricher; otherwise use gseGO/enrichGO.
+#' @param TERM2NAME Optional two-column custom term names.
+#' @param ont Gene Ontology namespace passed to `clusterProfiler` when `OrgDb`
+#'   is used.
+#' @param ranking Ranking statistic: signed square-root F statistic or log-fold
+#'   change multiplied by negative log10 p-value.
+#' @param minGSSize,maxGSSize Minimum and maximum gene-set sizes tested.
+#' @param exponent Weighting exponent used by the GSEA algorithm.
+#' @param run_ora Also run separate up/down ORA with each contrast's eligible
+#'   measured genes as its own universe. Empty DEG sets are logged, not errors.
+#' @param gene_fdr_cutoff,gene_logfc_cutoff FDR and absolute log-fold-change
+#'   thresholds used to define up- and downregulated ORA gene lists.
+#' @param seed Integer random seed used for reproducible GSEA execution.
+#' @param verbose Logical scalar. Whether to report progress for each contrast.
+#' @return All tested enrichment results, objects, rankings, universes and QC.
+#'   pvalueCutoff=1 retains nonsignificant tests for cross-comparison heatmaps.
+#' @export
+run_bulk_gene_enrichment <- function(
+    gene_de, OrgDb = NULL, ont = "BP", TERM2GENE = NULL, TERM2NAME = NULL,
+    ranking = c("signed_sqrt_F", "logFC_logP"),
+    minGSSize = 15L, maxGSSize = 500L, exponent = 1,
+    run_ora = TRUE, gene_fdr_cutoff = 0.05, gene_logfc_cutoff = 0,
+    seed = 123L, verbose = TRUE
+) {
+    if (!requireNamespace("clusterProfiler", quietly = TRUE)) stop("clusterProfiler is required.")
+    if (!requireNamespace("AnnotationDbi", quietly = TRUE)) stop("AnnotationDbi is required.")
+    ranking <- match.arg(ranking)
+    if (!is.list(gene_de) || !all(c("table", "comparison_info") %in% names(gene_de))) stop("Invalid gene_de.")
+    if (!ont %in% c("BP", "MF", "CC", "ALL")) stop("Invalid GO ontology.")
+    if (!is.numeric(minGSSize) || length(minGSSize) != 1L || !is.finite(minGSSize) ||
+        minGSSize < 2 || minGSSize != floor(minGSSize) ||
+        !is.numeric(maxGSSize) || length(maxGSSize) != 1L || !is.finite(maxGSSize) ||
+        maxGSSize < minGSSize || maxGSSize != floor(maxGSSize)) stop("Invalid gene-set sizes.")
+    if (!is.numeric(exponent) || length(exponent) != 1L || !is.finite(exponent) || exponent < 0) stop("Invalid exponent.")
+    for (x in list(run_ora, verbose)) {
+        if (!is.logical(x) || length(x) != 1L || is.na(x)) stop("run_ora/verbose must be logical scalars.")
+    }
+    if (!is.numeric(gene_fdr_cutoff) || length(gene_fdr_cutoff) != 1L ||
+        !is.finite(gene_fdr_cutoff) || gene_fdr_cutoff < 0 || gene_fdr_cutoff > 1 ||
+        !is.numeric(gene_logfc_cutoff) || length(gene_logfc_cutoff) != 1L ||
+        !is.finite(gene_logfc_cutoff) || gene_logfc_cutoff < 0) stop("Invalid DEG thresholds.")
+    custom <- !is.null(TERM2GENE)
+    if (custom) {
+        if (!is.data.frame(TERM2GENE) || ncol(TERM2GENE) != 2L || !nrow(TERM2GENE) || anyNA(TERM2GENE)) {
+            stop("TERM2GENE must be a nonempty two-column term-to-gene-SYMBOL data frame.")
+        }
+        TERM2GENE[] <- lapply(TERM2GENE, as.character)
+        if (any(TERM2GENE[[1]] == "") || any(TERM2GENE[[2]] == "")) stop("Blank term/gene IDs.")
+        TERM2GENE <- unique(TERM2GENE)
+        if (!is.null(TERM2NAME) && (!is.data.frame(TERM2NAME) || ncol(TERM2NAME) != 2L || anyNA(TERM2NAME))) {
+            stop("TERM2NAME must have two columns with no missing values.")
+        }
+        eligible_symbols <- unique(TERM2GENE[[2]])
+    } else {
+        if (is.null(OrgDb) || !inherits(OrgDb, "OrgDb")) stop("Supply an organism OrgDb for GO enrichment.")
+        eligible_symbols <- AnnotationDbi::keys(OrgDb, keytype = "SYMBOL")
+    }
+    objects <- rankings <- universes <- ora_objects <- list()
+    tables <- ora_tables <- qcs <- list()
+    info <- gene_de$comparison_info
+    add_info <- function(x, i) {
+        if (!nrow(x)) return(NULL)
+        for (nm in names(info)) x[[nm]] <- info[[nm]][i]
+        x
+    }
+    for (i in seq_len(nrow(info))) {
+        nm <- info$ResultName[i]
+        if (verbose) message("\nEnrichment: ", nm)
+        x <- gene_de$table[gene_de$table$ResultName == nm, , drop = FALSE]
+        n_input <- nrow(x)
+        x <- x[x$Gene %in% eligible_symbols, , drop = FALSE]
+        if (!nrow(x)) stop("No genes match annotation in ", nm, "; check species/namespace.")
+        if (anyDuplicated(x$Gene)) stop("Duplicated ranked symbols in ", nm)
+        if (ranking == "signed_sqrt_F") {
+            stat <- sign(x$logFC) * sqrt(x$F)
+        } else {
+            if (any(!is.finite(x$PValue))) stop("Nonfinite P values for ranking.")
+            stat <- x$logFC * -log10(pmax(x$PValue, .Machine$double.xmin))
+        }
+        if (any(!is.finite(stat)) || stats::sd(stat) == 0) stop("Invalid ranking in ", nm)
+        geneList <- stats::setNames(stat, x$Gene)
+        # Deterministic tie order; tied statistics are retained without jitter.
+        geneList <- geneList[order(-geneList, names(geneList))]
+        if (!any(geneList > 0) || !any(geneList < 0)) {
+            warning("Ranking is one-sided in ", nm, "; inspect this comparison.")
+        }
+        rankings[[nm]] <- geneList
+        universes[[nm]] <- names(geneList)
+        base_args <- list(geneList = geneList, exponent = exponent,
+                          minGSSize = minGSSize, maxGSSize = maxGSSize,
+                          pvalueCutoff = 1, pAdjustMethod = "BH", eps = 0,
+                          verbose = verbose, seed = FALSE, by = "fgsea")
+        # Preserve the caller's RNG state while making this analysis reproducible.
+        had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+        old_seed <- if (had_seed) get(".Random.seed", envir = .GlobalEnv) else NULL
+        restore_rng <- function() {
+            if (had_seed) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+            else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+                rm(".Random.seed", envir = .GlobalEnv)
+            }
+        }
+        set.seed(seed)
+        obj <- tryCatch({
+            if (custom) {
+                do.call(clusterProfiler::GSEA, c(base_args, list(TERM2GENE = TERM2GENE, TERM2NAME = TERM2NAME)))
+            } else {
+                do.call(clusterProfiler::gseGO, c(base_args, list(OrgDb = OrgDb, keyType = "SYMBOL", ont = ont)))
+            }
+        }, finally = restore_rng())
+        if (is.null(obj)) stop("No eligible gene sets for GSEA in ", nm, "; adjust set-size bounds.")
+        objects[[nm]] <- obj
+        g <- as.data.frame(obj)
+        tables[[nm]] <- add_info(g, i)
+        up <- x$Gene[!is.na(x$FDR) & x$FDR < gene_fdr_cutoff & x$logFC > gene_logfc_cutoff]
+        down <- x$Gene[!is.na(x$FDR) & x$FDR < gene_fdr_cutoff & x$logFC < -gene_logfc_cutoff]
+        qcs[[nm]] <- data.frame(ResultName = nm, Tested_symbols = n_input,
+                                Annotated_symbols = nrow(x), Unmatched_symbols = n_input - nrow(x),
+                                Ranking_ties = sum(duplicated(stat)), Up_genes = length(up),
+                                Down_genes = length(down), GSEA_terms_returned = nrow(g))
+        if (run_ora) {
+            ora_objects[[nm]] <- list()
+            for (direction in c("Up", "Down")) {
+                genes <- if (direction == "Up") up else down
+                if (!length(genes)) next
+                args <- list(gene = genes, universe = universes[[nm]],
+                             minGSSize = minGSSize, maxGSSize = maxGSSize,
+                             pvalueCutoff = 1, qvalueCutoff = 1, pAdjustMethod = "BH")
+                if (custom) {
+                    o <- do.call(clusterProfiler::enricher, c(args, list(TERM2GENE = TERM2GENE, TERM2NAME = TERM2NAME)))
+                } else {
+                    o <- do.call(clusterProfiler::enrichGO, c(args, list(OrgDb = OrgDb, keyType = "SYMBOL", ont = ont)))
+                }
+                if (is.null(o)) next
+                ora_objects[[nm]][[direction]] <- o
+                t <- add_info(as.data.frame(o), i)
+                if (!is.null(t)) {
+                    t$Direction <- direction
+                    ora_tables[[paste(nm, direction, sep = "__")]] <- t
+                }
+            }
+        }
+    }
+    gsea <- do.call(rbind, tables)
+    ora <- do.call(rbind, ora_tables)
+    if (is.null(gsea)) gsea <- data.frame()
+    if (is.null(ora)) ora <- data.frame()
+    if (nrow(gsea)) gsea$FDR_global <- stats::p.adjust(gsea$pvalue, "BH")
+    if (nrow(ora)) ora$FDR_global <- stats::p.adjust(ora$pvalue, "BH")
+    list(gsea = gsea, ora = ora, gsea_objects = objects, ora_objects = ora_objects,
+         rankings = rankings, universes = universes, qc = do.call(rbind, qcs),
+         comparison_info = info, annotation = if (custom) list(TERM2GENE = TERM2GENE, TERM2NAME = TERM2NAME)
+             else list(OrgDb_metadata = AnnotationDbi::metadata(OrgDb), ont = ont),
+         settings = list(ranking = ranking, minGSSize = minGSSize, maxGSSize = maxGSSize,
+                          exponent = exponent, run_ora = run_ora, seed = seed,
+                          gene_fdr_cutoff = gene_fdr_cutoff, gene_logfc_cutoff = gene_logfc_cutoff),
+         session = utils::sessionInfo())
+}
+
+
+#' Plot gene logFC or pathway NES over an explicit comparison manifest
+#' Missing/untested cells remain NA (grey), never zero. Selection uses the union
+#' of significant features; top_n=NULL keeps all. Row clustering uses 1-Pearson-r
+#' with average linkage. If some distances are undefined, all rows are preserved
+#' and clustering is disabled with an explicit warning.
+#'
+#' @param results Data frame containing one row per feature and comparison,
+#'   including effect values and multiple-testing results.
+#' @param comparison_info Data frame defining the expected subtype-condition
+#'   comparison grid and its display order.
+#' @param feature_col,value_col,fdr_col Columns containing feature identifiers,
+#'   displayed effect values, and adjusted p-values.
+#' @param fdr_cutoff Numeric significance threshold used to select the union of
+#'   displayed features.
+#' @param label_col `NULL` or a column containing alternative row labels.
+#' @param subtype_order,condition_order Explicit column-annotation orders.
+#' @param subtype_colors,condition_colors Named annotation colour vectors.
+#' @param top_n `NULL` for all significant features or a positive integer
+#'   limiting rows by their best FDR.
+#' @param row_zscore Logical scalar. Whether each feature is standardized across
+#'   comparison columns before display.
+#' @param color Heatmap colour vector with at least two valid colours.
+#' @param value_limit `NULL` or a positive symmetric display limit.
+#' @param label_width Positive integer used to wrap long row labels.
+#' @param fontsize_row Row-label font size.
+#' @param width,height Saved figure dimensions in inches; `NULL` height adapts
+#'   to the number of selected features.
+#' @param save `NULL` or a PDF/PNG/TIFF output filename.
+#' @param subtype_col,condition_col Column names in `comparison_info` containing
+#'   subtype and condition labels.
+#'
+#' @return A list containing the `pheatmap` object, raw and displayed matrices,
+#'   FDR matrix, row and column annotations, optional row tree, selected
+#'   features, and aligned comparison manifest.
+#' @export
+plot_bulk_comparison_heatmap <- function(
+    results,
+    comparison_info,
+    feature_col = "Gene",
+    value_col = "logFC",
+    fdr_col = "FDR",
+    fdr_cutoff = 0.05,
+    label_col = NULL,
+
+    subtype_order = c("pATM", "cATM", "sATM"),
+    condition_order = c("2W", "1M", "2M"),
+    subtype_colors,
+    condition_colors,
+
+    top_n = NULL,
+    row_zscore = FALSE,
+
+    color = BULK_ACTIVITY_DIVERGING_COLORS,
+
+    value_limit = NULL,
+    label_width = 55L,
+    fontsize_row = 9,
+    width = 11,
+    height = NULL,
+    save = NULL,
+
+    subtype_col = "Subtype",
+    condition_col = "Condition"
+) {
+
+    # -------------------------------------------------------------------------
+    # Validate inputs
+    # -------------------------------------------------------------------------
+
+    if (!requireNamespace("pheatmap", quietly = TRUE)) {
+        stop("Package `pheatmap` is required.")
+    }
+
+    for (column in list(subtype_col, condition_col)) {
+        if (!is.character(column) ||
+            length(column) != 1L ||
+            is.na(column) ||
+            !nzchar(column)) {
+            stop("subtype_col and condition_col must be column names.")
+        }
+    }
+
+    if (subtype_col == condition_col) {
+        stop("subtype_col and condition_col must be different.")
+    }
+
+    needed_results <- c(
+        feature_col, value_col, fdr_col, "ResultName"
+    )
+
+    needed_info <- c(
+        "ResultName", subtype_col, condition_col, "Reference"
+    )
+
+    if (!is.data.frame(results) ||
+        !all(needed_results %in% names(results))) {
+        stop(
+            "Missing result columns: ",
+            paste(setdiff(needed_results, names(results)), collapse = ", ")
+        )
+    }
+
+    if (!is.data.frame(comparison_info) ||
+        !all(needed_info %in% names(comparison_info))) {
+        stop(
+            "Missing comparison manifest columns: ",
+            paste(setdiff(needed_info, names(comparison_info)), collapse = ", ")
+        )
+    }
+
+    if (!is.numeric(results[[value_col]]) ||
+        !is.numeric(results[[fdr_col]])) {
+        stop("Values and FDR must be numeric.")
+    }
+
+    observed_fdr <- results[[fdr_col]][!is.na(results[[fdr_col]])]
+
+    if (any(!is.finite(observed_fdr)) ||
+        any(observed_fdr < 0 | observed_fdr > 1)) {
+        stop("Observed FDR values must be finite and between 0 and 1.")
+    }
+
+    if (!is.numeric(fdr_cutoff) ||
+        length(fdr_cutoff) != 1L ||
+        !is.finite(fdr_cutoff) ||
+        fdr_cutoff < 0 ||
+        fdr_cutoff > 1) {
+        stop("Invalid FDR cutoff.")
+    }
+
+    if (!is.logical(row_zscore) ||
+        length(row_zscore) != 1L ||
+        is.na(row_zscore)) {
+        stop("Invalid row_zscore.")
+    }
+
+    subtype_order <- as.character(subtype_order)
+    condition_order <- as.character(condition_order)
+
+    if (!length(subtype_order) ||
+        !length(condition_order) ||
+        anyDuplicated(subtype_order) ||
+        anyDuplicated(condition_order) ||
+        anyNA(c(subtype_order, condition_order)) ||
+        any(!nzchar(c(subtype_order, condition_order)))) {
+        stop("Invalid subtype or condition orders.")
+    }
+
+    if (!is.character(color) ||
+        length(color) < 2L ||
+        anyNA(color)) {
+        stop("Invalid heatmap color vector.")
+    }
+
+    invisible(grDevices::col2rgb(color))
+
+    # Allow named vectors or named lists of annotation colors.
+    subtype_colors <- unlist(subtype_colors)
+    condition_colors <- unlist(condition_colors)
+
+    if (anyDuplicated(names(subtype_colors)) ||
+        anyDuplicated(names(condition_colors)) ||
+        !all(subtype_order %in% names(subtype_colors)) ||
+        !all(condition_order %in% names(condition_colors))) {
+        stop("Missing or duplicated annotation color names.")
+    }
+
+    invisible(
+        grDevices::col2rgb(
+            c(
+                subtype_colors[subtype_order],
+                condition_colors[condition_order]
+            )
+        )
+    )
+
+    # -------------------------------------------------------------------------
+    # Select and order the comparison manifest
+    # -------------------------------------------------------------------------
+
+    keep_info <- (
+        as.character(comparison_info[[subtype_col]]) %in% subtype_order &
+        as.character(comparison_info[[condition_col]]) %in% condition_order
+    )
+
+    info <- comparison_info[keep_info, , drop = FALSE]
+
+    if (!nrow(info) ||
+        anyNA(info[, needed_info, drop = FALSE]) ||
+        anyDuplicated(info$ResultName) ||
+        anyDuplicated(info[, c(subtype_col, condition_col), drop = FALSE])) {
+        stop("Invalid or ambiguous comparison manifest.")
+    }
+
+    info <- info[
+        order(
+            match(as.character(info[[subtype_col]]), subtype_order),
+            match(as.character(info[[condition_col]]), condition_order)
+        ),
+        ,
+        drop = FALSE
+    ]
+
+    if (nrow(info) != length(subtype_order) * length(condition_order) ||
+        length(unique(info$Reference)) != 1L) {
+        stop("Require a full comparison grid with one reference.")
+    }
+
+    # -------------------------------------------------------------------------
+    # Select the union of significant features
+    # -------------------------------------------------------------------------
+
+    x <- results[
+        results$ResultName %in% info$ResultName,
+        ,
+        drop = FALSE
+    ]
+
+    if (anyDuplicated(x[, c(feature_col, "ResultName"), drop = FALSE]) ||
+        anyNA(x[[feature_col]]) ||
+        any(!nzchar(as.character(x[[feature_col]])))) {
+        stop("Duplicated or missing feature-comparison identifiers.")
+    }
+
+    sig <- x[
+        !is.na(x[[fdr_col]]) & x[[fdr_col]] < fdr_cutoff,
+        ,
+        drop = FALSE
+    ]
+
+    ids <- unique(as.character(sig[[feature_col]]))
+
+    if (!length(ids)) {
+        stop("No significant features for the selected comparisons.")
+    }
+
+    best_fdr <- vapply(
+        ids,
+        function(id) {
+            min(
+                sig[[fdr_col]][
+                    as.character(sig[[feature_col]]) == id
+                ]
+            )
+        },
+        numeric(1)
+    )
+
+    ids <- ids[order(best_fdr, ids)]
+
+    if (!is.null(top_n)) {
+
+        if (!is.numeric(top_n) ||
+            length(top_n) != 1L ||
+            !is.finite(top_n) ||
+            top_n < 1 ||
+            top_n != floor(top_n)) {
+            stop("Invalid top_n.")
+        }
+
+        ids <- head(ids, top_n)
+    }
+
+    x <- x[
+        as.character(x[[feature_col]]) %in% ids,
+        ,
+        drop = FALSE
+    ]
+
+    # -------------------------------------------------------------------------
+    # Assemble value and FDR matrices
+    # Missing/untested combinations remain NA.
+    # -------------------------------------------------------------------------
+
+    raw <- matrix(
+        NA_real_,
+        nrow = length(ids),
+        ncol = nrow(info),
+        dimnames = list(ids, as.character(info$ResultName))
+    )
+
+    fdr_mat <- raw
+
+    indices <- cbind(
+        match(as.character(x[[feature_col]]), ids),
+        match(as.character(x$ResultName), as.character(info$ResultName))
+    )
+
+    raw[indices] <- x[[value_col]]
+    fdr_mat[indices] <- x[[fdr_col]]
+
+    raw[!is.finite(raw)] <- NA_real_
+
+    display <- raw
+
+    if (row_zscore) {
+
+        means <- rowMeans(raw, na.rm = TRUE)
+        sds <- apply(raw, 1L, stats::sd, na.rm = TRUE)
+
+        if (any(!is.finite(sds) | sds == 0)) {
+            stop("Cannot z-score a constant or sparsely observed feature.")
+        }
+
+        display <- sweep(
+            sweep(raw, 1L, means, "-"),
+            1L,
+            sds,
+            "/"
+        )
+    }
+
+    # -------------------------------------------------------------------------
+    # Row clustering: 1 - Pearson correlation, average linkage
+    # Require at least three shared observations for every row pair.
+    # -------------------------------------------------------------------------
+
+    row_tree <- FALSE
+
+    if (nrow(display) > 1L) {
+
+        correlation_matrix <- suppressWarnings(
+            stats::cor(
+                t(display),
+                use = "pairwise.complete.obs"
+            )
+        )
+
+        overlap <- tcrossprod(
+            1L * is.finite(display)
+        )
+
+        valid <- is.finite(correlation_matrix) & overlap >= 3L
+        diag(valid) <- TRUE
+
+        if (all(valid)) {
+
+            distance_matrix <- 1 - correlation_matrix
+            distance_matrix[distance_matrix < 0] <- 0
+            diag(distance_matrix) <- 0
+
+            row_tree <- stats::hclust(
+                stats::as.dist(distance_matrix),
+                method = "average"
+            )
+
+        } else {
+
+            warning(
+                "Undefined or insufficient row correlations; ",
+                "showing all selected features without a dendrogram. ",
+                "Missing values remain NA.",
+                call. = FALSE
+            )
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    # Dynamic column annotations
+    # -------------------------------------------------------------------------
+
+    ann_col <- data.frame(
+        row.names = as.character(info$ResultName)
+    )
+
+    ann_col[[subtype_col]] <- factor(
+        as.character(info[[subtype_col]]),
+        levels = subtype_order
+    )
+
+    ann_col[[condition_col]] <- factor(
+        as.character(info[[condition_col]]),
+        levels = condition_order
+    )
+
+    ann_row <- data.frame(row.names = ids)
+
+    ann_colors <- list()
+
+    ann_colors[[subtype_col]] <- subtype_colors[subtype_order]
+    ann_colors[[condition_col]] <- condition_colors[condition_order]
+
+    # Binary row annotation for significance in each subtype.
+    for (subtype in subtype_order) {
+
+        subtype_columns <- as.character(
+            info$ResultName[
+                as.character(info[[subtype_col]]) == subtype
+            ]
+        )
+
+        significant_in_subtype <- rowSums(
+            fdr_mat[, subtype_columns, drop = FALSE] < fdr_cutoff,
+            na.rm = TRUE
+        ) > 0
+
+        annotation_name <- paste0("Sig_", subtype)
+
+        ann_row[[annotation_name]] <- factor(
+            ifelse(significant_in_subtype, "Yes", "No"),
+            levels = c("No", "Yes")
+        )
+
+        ann_colors[[annotation_name]] <- c(
+            No = "#F0F0F0",
+            Yes = unname(subtype_colors[subtype])
+        )
+    }
+
+    # -------------------------------------------------------------------------
+    # Row labels
+    # -------------------------------------------------------------------------
+
+    labels <- ids
+
+    if (!is.null(label_col)) {
+
+        if (!label_col %in% names(x)) {
+            stop("Missing label_col.")
+        }
+
+        labels <- as.character(
+            x[[label_col]][
+                match(ids, as.character(x[[feature_col]]))
+            ]
+        )
+
+        # Fall back to the stable feature ID for missing descriptions.
+        missing_labels <- is.na(labels) | !nzchar(labels)
+        labels[missing_labels] <- ids[missing_labels]
+
+        labels <- vapply(
+            labels,
+            function(label) {
+                paste(
+                    strwrap(label, width = label_width),
+                    collapse = "\n"
+                )
+            },
+            character(1)
+        )
+    }
+
+    # -------------------------------------------------------------------------
+    # Color limits and significance stars
+    # -------------------------------------------------------------------------
+
+    if (is.null(value_limit)) {
+
+        if (!any(is.finite(display))) {
+            stop("No finite values are available for the selected features.")
+        }
+
+        value_limit <- max(abs(display), na.rm = TRUE)
+    }
+
+    if (!is.numeric(value_limit) ||
+        length(value_limit) != 1L ||
+        !is.finite(value_limit) ||
+        value_limit < 0) {
+        stop("Invalid value_limit.")
+    }
+
+    if (value_limit == 0) {
+        value_limit <- 1
+    }
+
+    clipped <- display
+
+    clipped[
+        !is.na(clipped) & clipped > value_limit
+    ] <- value_limit
+
+    clipped[
+        !is.na(clipped) & clipped < -value_limit
+    ] <- -value_limit
+
+    stars <- ifelse(
+        !is.na(fdr_mat) & fdr_mat < fdr_cutoff,
+        "*",
+        ""
+    )
+
+    if (is.null(height)) {
+        height <- max(
+            5,
+            2.5 + 0.18 * sum(
+                vapply(
+                    strsplit(labels, "\n"),
+                    length,
+                    integer(1)
+                )
+            )
+        )
+    }
+
+    subtype_counts <- as.integer(
+        table(
+            factor(
+                as.character(info[[subtype_col]]),
+                levels = subtype_order
+            )
+        )
+    )
+
+    gaps_col <- if (length(subtype_counts) > 1L) {
+        head(cumsum(subtype_counts), -1L)
+    } else {
+        NULL
+    }
+
+    # -------------------------------------------------------------------------
+    # Plot and optionally save
+    # -------------------------------------------------------------------------
+
+    args <- list(
+        mat = clipped,
+        scale = "none",
+
+        cluster_rows = row_tree,
+        cluster_cols = FALSE,
+
+        annotation_col = ann_col,
+        annotation_row = ann_row,
+        annotation_colors = ann_colors,
+        drop_levels = FALSE,
+
+        color = color,
+        na_col = "#D9D9D9",
+        border_color = NA,
+
+        breaks = seq(
+            -value_limit,
+            value_limit,
+            length.out = length(color) + 1L
+        ),
+
+        labels_row = labels,
+        labels_col = paste(
+            as.character(info[[condition_col]]),
+            "vs",
+            as.character(info$Reference)
+        ),
+
+        gaps_col = gaps_col,
+
+        display_numbers = stars,
+        number_color = "black",
+        fontsize_number = 8,
+        fontsize_row = fontsize_row,
+        fontsize_col = 10,
+        angle_col = "45",
+
+        main = paste0(
+            "Significant features: ",
+            value_col,
+            if (row_zscore) " (row z-score)" else "",
+            "\n* ",
+            fdr_col,
+            " < ",
+            fdr_cutoff
+        ),
+
+        silent = TRUE
+    )
+
+    if (!is.null(save)) {
+
+        if (!is.character(save) ||
+            length(save) != 1L ||
+            is.na(save) ||
+            !nzchar(save)) {
+            stop("Invalid save filename.")
+        }
+
+        if (!dir.exists(dirname(save))) {
+            dir.create(dirname(save), recursive = TRUE)
+        }
+
+        args$filename <- save
+        args$width <- width
+        args$height <- height
+    }
+
+    plot <- do.call(
+        pheatmap::pheatmap,
+        args
+    )
+
+    grid::grid.newpage()
+    grid::grid.draw(plot$gtable)
+
+    list(
+        plot = plot,
+        raw_matrix = raw,
+        display_matrix = display,
+        fdr_matrix = fdr_mat,
+        annotation_row = ann_row,
+        annotation_col = ann_col,
+        row_tree = row_tree,
+        selected_features = ids,
+        comparison_info = info
+    )
+}
+
+
+#' Test an overall condition response or a numerical-duration trend with edgeR
+#' All selected samples are fitted together. Omnibus F statistics are unsigned;
+#' never pass them to a signed enrichment ranking without an actual contrast.
+#' @param test Omnibus tests all non-reference condition coefficients jointly;
+#'   linear tests one numerical duration coefficient.
+#' @param duration_col Required for linear mode, with verified numerical units.
+#' @param covariates Optional categorical/numeric adjustment columns. A verified
+#'   subject column can be supplied as a fixed-effect covariate when estimable.
+#' @param dat A featureCounts project containing aligned raw counts, metadata,
+#'   and gene annotations.
+#' @param group_col Metadata column defining the experimental conditions.
+#' @param group_order Explicit factor order with the reference condition first.
+#' @param subset Optional unquoted expression evaluated within sample metadata.
+#' @param robust Logical scalar passed to edgeR dispersion and quasi-likelihood
+#'   fitting functions.
+#' @param verbose Logical scalar. Whether to print group counts and result totals.
+#'
+#' @return A list containing the method label, complete edgeR result table,
+#'   filtered normalized `DGEList`, fit, quasi-likelihood test, design matrix,
+#'   tested coefficients, selected metadata, condition order, duration and
+#'   covariate settings, gene filter, and session information.
+#' @export
+edgeR_condition_response <- function(
+    dat, group_col = "Condition", group_order = c("ND", "2W", "1M", "2M"),
+    subset = NULL, test = c("omnibus", "linear"), duration_col = NULL,
+    covariates = NULL, robust = TRUE, verbose = TRUE
+) {
+    if (!requireNamespace("edgeR", quietly = TRUE)) stop("edgeR is required.")
+    test <- match.arg(test)
+    if (!is.list(dat) || !all(c("counts", "metadata", "genes") %in% names(dat))) stop("Invalid dat.")
+    meta <- as.data.frame(dat$metadata)
+    counts <- as.matrix(dat$counts)
+    anno <- as.data.frame(dat$genes)
+    if (!is.numeric(counts) || any(!is.finite(counts)) || any(counts < 0) ||
+        anyDuplicated(rownames(counts)) || anyDuplicated(colnames(counts)) ||
+        !identical(colnames(counts), rownames(meta)) || !identical(rownames(counts), rownames(anno))) {
+        stop("Counts, metadata and genes must be finite, nonnegative and aligned.")
+    }
+    if (!group_col %in% names(meta) || anyDuplicated(group_order) || anyNA(group_order) || length(group_order) < 2L) stop("Invalid condition specification.")
+    for (value in list(robust, verbose)) {
+        if (!is.logical(value) || length(value) != 1L || is.na(value)) stop("robust/verbose must be logical scalars.")
+    }
+    expr <- substitute(subset)
+    selected <- rep(TRUE, nrow(meta))
+    if (!identical(expr, quote(NULL))) {
+        selected <- eval(expr, envir = meta, enclos = parent.frame())
+        if (!is.logical(selected) || length(selected) != nrow(meta) || anyNA(selected)) stop("Invalid subset expression.")
+    }
+    selected <- selected & !is.na(meta[[group_col]]) & as.character(meta[[group_col]]) %in% group_order
+    meta <- meta[selected, , drop = FALSE]
+    counts <- counts[, rownames(meta), drop = FALSE]
+    group <- factor(as.character(meta[[group_col]]), levels = group_order)
+    if (any(table(group) < 2L)) stop("At least two samples are required in every requested condition.")
+    if (!is.null(covariates) && (!is.character(covariates) || anyNA(covariates) ||
+        anyDuplicated(covariates) || !all(covariates %in% names(meta)))) stop("Invalid covariates.")
+    if (group_col %in% covariates || (!is.null(duration_col) && duration_col %in% covariates)) stop("Do not duplicate the main predictor as a covariate.")
+    model_data <- data.frame(row.names = rownames(meta))
+    if (test == "omnibus") {
+        model_data$.group <- group
+        predictor <- ".group"
+    } else {
+        if (is.null(duration_col) || length(duration_col) != 1L || !duration_col %in% names(meta)) {
+            stop("Linear trends require a verified numerical duration_col.")
+        }
+        duration <- meta[[duration_col]]
+        if (!is.numeric(duration) || any(!is.finite(duration)) || length(unique(duration)) < 2L) stop("Invalid numerical durations.")
+        model_data$.duration <- duration
+        predictor <- ".duration"
+    }
+    adjustment <- character()
+    for (i in seq_along(covariates)) {
+        value <- meta[[covariates[i]]]
+        if (anyNA(value) || length(unique(value)) < 2L) stop("Missing or constant covariate: ", covariates[i])
+        if (is.character(value) || is.factor(value) || is.logical(value)) {
+            value <- droplevels(factor(value))
+        } else if (!is.numeric(value) || any(!is.finite(value))) {
+            stop("Invalid covariate type.")
+        }
+        nm <- paste0(".cov", i)
+        model_data[[nm]] <- value
+        adjustment <- c(adjustment, nm)
+    }
+    design <- stats::model.matrix(stats::reformulate(c(predictor, adjustment)), model_data)
+    if (qr(design)$rank < ncol(design)) stop("Rank-deficient design: check condition/batch/subject confounding.")
+    if (nrow(design) <= ncol(design)) stop("No residual degrees of freedom.")
+    dge <- edgeR::DGEList(counts = counts, genes = anno)
+    keep <- edgeR::filterByExpr(dge, design = design)
+    if (!any(keep)) stop("No genes passed expression filtering.")
+    dge <- dge[keep, , keep.lib.sizes = FALSE]
+    dge <- edgeR::calcNormFactors(dge, method = "TMM")
+    dge <- edgeR::estimateDisp(dge, design = design, robust = robust)
+    fit <- edgeR::glmQLFit(dge, design = design, robust = robust)
+    coef <- if (test == "omnibus") which(startsWith(colnames(design), ".group")) else match(".duration", colnames(design))
+    qlf <- edgeR::glmQLFTest(fit, coef = coef)
+    results <- edgeR::topTags(qlf, n = Inf)$table
+    if (verbose) {
+        message("\nCondition analysis: ", test)
+        print(table(group))
+        message("Tested genes: ", nrow(results), "; FDR < 0.05: ", sum(results$FDR < 0.05, na.rm = TRUE))
+    }
+    list(method = paste0("edgeR_condition_", test), results = results,
+         dge = dge, fit = fit, qlf = qlf, design = design, tested_coefficients = coef,
+         metadata = meta, group_order = group_order, duration_col = duration_col,
+         covariates = covariates, keep_genes = keep, session = utils::sessionInfo())
+}
+
+
+#' Plot bulk expression values with optional within-subject pairing
+#'
+#' Display observations across an ordered categorical axis, optionally connect
+#' repeated measurements belonging to the same verified subject, and facet by
+#' an experimental variable. This function expects tidy, already-normalized
+#' expression data and does not perform normalization or statistical testing.
+#'
+#' @param df Data frame containing the plotting, grouping, and optional pairing
+#'   columns.
+#' @param x,y Column names used for the categorical x-axis and numeric
+#'   expression y-axis.
+#' @param pair_by `NULL` for unconnected observations or a column containing
+#'   subject/pair identifiers to connect within facets.
+#' @param facet_by `NULL` or a column used to create facet panels.
+#' @param x_order `NULL` or an explicit character order for x-axis levels.
+#' @param colors `NULL`, an unnamed colour vector assigned in level order, or a
+#'   named vector covering every displayed x-axis level.
+#' @param point_size,point_alpha,point_stroke Point size, opacity, and outline
+#'   width.
+#' @param line_width,line_alpha,line_color Appearance of optional paired lines.
+#' @param facet_nrow Positive integer giving the number of facet rows.
+#' @param facet_scales Facet scale mode passed to [ggplot2::facet_wrap()].
+#' @param rotate_x Numeric x-axis label angle in degrees.
+#' @param y_title,x_title,title ggplot2-compatible axis and plot titles.
+#' @param show_mean Logical scalar. Whether to overlay group mean markers.
+#' @param mean_size Positive numeric size for mean markers.
+#' @param width,height Saved figure dimensions in inches.
+#' @param save `NULL` or a figure output path. PDF output uses Cairo and other
+#'   formats use 300 dpi.
+#'
+#' @return A [ggplot2::ggplot()] object containing the paired or unpaired
+#'   expression display.
+#' @export
+plot_bulk_paired_expression <- function(
+    df,
+    x = "Sorting",
+    y = "Expression",
+    pair_by = NULL,
+    facet_by = "Condition",
+    x_order = NULL,
+    colors = NULL,
+    point_size = 3.2,
+    point_alpha = 0.95,
+    point_stroke = 0.45,
+    line_width = 0.55,
+    line_alpha = 0.55,
+    line_color = "grey55",
+    facet_nrow = 1,
+    facet_scales = "fixed",
+    rotate_x = 35,
+    y_title = expression(TMM ~ normalized ~ log[2] ~ CPM),
+    x_title = NULL,
+    title = NULL,
+    show_mean = FALSE,
+    mean_size = 4,
+    width = 8,
+    height = 4,
+    save = NULL
+) {
+
+    if (!requireNamespace("ggplot2", quietly = TRUE)) {
+        stop("Package `ggplot2` is required.", call. = FALSE)
+    }
+
+    # ============================================================
+    # Check columns
+    # ============================================================
+
+    required_cols <- c(
+        x,
+        y,
+        pair_by,
+        facet_by
+    )
+
+    missing_cols <- setdiff(
+        required_cols,
+        colnames(df)
+    )
+
+    if (length(missing_cols) > 0) {
+        stop(
+            "Missing columns: ",
+            paste(missing_cols, collapse = ", ")
+        )
+    }
+
+    df_plot <- df
+
+    # ============================================================
+    # X-axis order
+    # ============================================================
+
+    if (!is.null(x_order)) {
+
+        df_plot[[x]] <- factor(
+            as.character(df_plot[[x]]),
+            levels = x_order
+        )
+
+    } else if (!is.factor(df_plot[[x]])) {
+
+        df_plot[[x]] <- factor(
+            df_plot[[x]],
+            levels = unique(df_plot[[x]])
+        )
+    }
+
+    x_levels <- levels(
+        droplevels(df_plot[[x]])
+    )
+
+    # ============================================================
+    # Macaron colors
+    # ============================================================
+
+    if (is.null(colors)) {
+
+        macaron_colors <- BULK_PAIRED_EXPRESSION_COLORS
+
+        if (length(x_levels) > length(macaron_colors)) {
+            stop(
+                "More groups than available default colors."
+            )
+        }
+
+        colors <- macaron_colors[
+            seq_along(x_levels)
+        ]
+
+        names(colors) <- x_levels
+
+    } else {
+
+        if (!is.character(colors) || anyNA(colors) || any(!nzchar(colors))) {
+            stop("colors must contain valid non-missing colour strings.")
+        }
+
+        if (is.null(names(colors))) {
+
+            if (length(colors) < length(x_levels)) {
+                stop("Not enough colors supplied for the displayed groups.")
+            }
+
+            colors <- colors[
+                seq_along(x_levels)
+            ]
+
+            names(colors) <- x_levels
+
+        } else {
+
+            missing_colors <- setdiff(x_levels, names(colors))
+
+            if (length(missing_colors) > 0L) {
+                stop(
+                    "Missing colors for group(s): ",
+                    paste(missing_colors, collapse = ", ")
+                )
+            }
+        }
+
+        colors <- colors[x_levels]
+    }
+
+    tryCatch(
+        grDevices::col2rgb(colors),
+        error = function(error) {
+            stop("colors contains an invalid R colour value.", call. = FALSE)
+        }
+    )
+
+    # ============================================================
+    # Plot
+    # ============================================================
+
+    p <- ggplot2::ggplot(
+        df_plot,
+        ggplot2::aes(
+            x = .data[[x]],
+            y = .data[[y]]
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Pairing lines
+    # ------------------------------------------------------------
+
+    if (!is.null(pair_by)) {
+
+        if (!is.character(pair_by) || length(pair_by) != 1L ||
+            is.na(pair_by) || pair_by == "") {
+            stop("pair_by must be one subject-ID column name or NULL.")
+        }
+        if (anyNA(df_plot[[pair_by]]) ||
+            any(trimws(as.character(df_plot[[pair_by]])) == "")) {
+            stop("Missing or blank pairing IDs.")
+        }
+        if (anyDuplicated(df_plot[unique(c(facet_by, pair_by, x))])) {
+            stop("Multiple observations for one subject, facet and x group; resolve replicates before pairing.")
+        }
+
+        line_mapping <- if (is.null(facet_by)) {
+            ggplot2::aes(group = .data[[pair_by]])
+        } else {
+            ggplot2::aes(
+                group = interaction(
+                    .data[[facet_by]],
+                    .data[[pair_by]]
+                )
+            )
+        }
+
+        p <- p + ggplot2::geom_line(
+            mapping = line_mapping,
+            colour = line_color,
+            linewidth = line_width,
+            alpha = line_alpha
+        )
+    }
+
+    # ------------------------------------------------------------
+    # Individual mice
+    # ------------------------------------------------------------
+
+    p <- p +
+        ggplot2::geom_point(
+            ggplot2::aes(
+                fill = .data[[x]]
+            ),
+            shape = 21,
+            size = point_size,
+            stroke = point_stroke,
+            colour = "black",
+            alpha = point_alpha
+        )
+
+    # ============================================================
+    # Optional group mean
+    # ============================================================
+
+    if (show_mean) {
+
+        p <- p +
+            ggplot2::stat_summary(
+                ggplot2::aes(
+                    group = .data[[x]]
+                ),
+                fun = mean,
+                geom = "point",
+                shape = 23,
+                size = mean_size,
+                stroke = 0.7,
+                fill = "white",
+                colour = "black"
+            )
+    }
+
+    # ============================================================
+    # Facets
+    # ============================================================
+
+    if (!is.null(facet_by)) {
+        facet_formula <- stats::reformulate(facet_by)
+        p <- p + ggplot2::facet_wrap(
+            facet_formula,
+            nrow = facet_nrow,
+            scales = facet_scales
+        )
+    }
+
+    # ============================================================
+    # Colors
+    # ============================================================
+
+    p <- p +
+        ggplot2::scale_fill_manual(
+            values = colors,
+            drop = FALSE
+        )
+
+    # ============================================================
+    # Labels
+    # ============================================================
+
+    p <- p +
+        ggplot2::labs(
+            x = x_title,
+            y = y_title,
+            title = title
+        )
+
+    # ============================================================
+    # Cell-style theme
+    # ============================================================
+
+    p <- p +
+        ggplot2::theme_classic(
+            base_size = 10
+        ) +
+        ggplot2::theme(
+
+            panel.grid =
+                ggplot2::element_blank(),
+
+            axis.line =
+                ggplot2::element_line(
+                    colour = "black",
+                    linewidth = 0.5
+                ),
+
+            axis.ticks =
+                ggplot2::element_line(
+                    colour = "black",
+                    linewidth = 0.45
+                ),
+
+            axis.ticks.length =
+                grid::unit(
+                    1.6,
+                    "mm"
+                ),
+
+            axis.text =
+                ggplot2::element_text(
+                    colour = "black",
+                    size = 9
+                ),
+
+            axis.text.x =
+                ggplot2::element_text(
+                    angle = rotate_x,
+                    hjust = ifelse(
+                        rotate_x == 0,
+                        0.5,
+                        1
+                    ),
+                    vjust = 1
+                ),
+
+            axis.title.x =
+                ggplot2::element_text(
+                    colour = "black",
+                    size = 10
+                ),
+
+            axis.title.y =
+                ggplot2::element_text(
+                    colour = "black",
+                    size = 10
+                ),
+
+            strip.background =
+                ggplot2::element_blank(),
+
+            strip.text =
+                ggplot2::element_text(
+                    colour = "black",
+                    face = "bold",
+                    size = 10
+                ),
+
+            panel.spacing.x =
+                grid::unit(
+                    5,
+                    "mm"
+                ),
+
+            legend.position =
+                "none",
+
+            plot.title =
+                ggplot2::element_text(
+                    colour = "black",
+                    face = "bold",
+                    size = 11,
+                    hjust = 0.5
+                ),
+
+            plot.margin =
+                ggplot2::margin(
+                    5.5,
+                    8,
+                    5.5,
+                    5.5
+                )
+        )
+
+    # ============================================================
+    # Save
+    # ============================================================
+
+    if (!is.null(save)) {
+
+        save_args <- list(
+            filename = save,
+            plot = p,
+            width = width,
+            height = height,
+            units = "in"
+        )
+
+        if (
+            grepl(
+                "\\.pdf$",
+                save,
+                ignore.case = TRUE
+            )
+        ) {
+            save_args$device <-
+                grDevices::cairo_pdf
+        } else {
+            save_args$dpi <- 300
+        }
+
+        do.call(
+            ggplot2::ggsave,
+            save_args
+        )
+    }
+
+    return(p)
+}
+
+
+#' Prepare bulk expression for ligand/receptor availability checks
+#' CPM has no log prior count. Duplicate symbols use the same representative
+#' row in CPM and logCPM, selected by mean logCPM before consulting DE results.
+#'
+#' @param bulk A prepared expression object returned by
+#'   [prepare_bulk_expression()] containing `dge`, `logCPM`, `genes`, and
+#'   `metadata` components in matching orders.
+#' @param gene_col Gene-symbol column in `bulk$genes`.
+#'
+#' @return A list containing symbol-indexed `logCPM` and unlogged `cpm`
+#'   matrices, aligned sample metadata, and a stable-ID-to-symbol mapping.
+#' @export
+prepare_bulk_signaling_expression <- function(bulk, gene_col = "gene_name") {
+    if (!requireNamespace("edgeR", quietly = TRUE)) stop("Package edgeR is required.")
+    if (!all(c("dge", "logCPM", "genes", "metadata") %in% names(bulk))) {
+        stop("Use the output of prepare_bulk_expression().")
+    }
+    x <- bulk$logCPM
+    if (!is.matrix(x) || !is.numeric(x) || any(!is.finite(x)) ||
+        is.null(rownames(x)) || is.null(colnames(x)) ||
+        anyDuplicated(rownames(x)) || anyDuplicated(colnames(x))) stop("Invalid logCPM matrix.")
+    if (!gene_col %in% names(bulk$genes)) stop("Missing gene annotation: ", gene_col)
+    if (is.null(rownames(bulk$metadata)) || anyDuplicated(rownames(bulk$metadata)) ||
+        !all(colnames(x) %in% rownames(bulk$metadata))) stop("Sample metadata do not match expression.")
+    if (!all(rownames(x) %in% rownames(bulk$genes))) stop("Gene annotation does not match expression.")
+    cpm <- edgeR::cpm(bulk$dge, log = FALSE)
+    if (!all(rownames(x) %in% rownames(cpm)) || !all(colnames(x) %in% colnames(cpm))) {
+        stop("DGEList does not match logCPM.")
+    }
+    cpm <- cpm[rownames(x), colnames(x), drop = FALSE]
+    if (any(!is.finite(cpm)) || any(cpm < 0)) stop("Invalid CPM values.")
+    symbols <- trimws(as.character(bulk$genes[rownames(x), gene_col]))
+    keep <- which(!is.na(symbols) & nzchar(symbols))
+    keep <- keep[order(-rowMeans(x)[keep], rownames(x)[keep])]
+    keep <- keep[!duplicated(symbols[keep])]
+    if (!length(keep)) stop("No valid gene symbols.")
+    mapping <- data.frame(GeneID = rownames(x)[keep], Gene = symbols[keep])
+    x <- x[keep, , drop = FALSE]
+    cpm <- cpm[keep, , drop = FALSE]
+    rownames(x) <- rownames(cpm) <- mapping$Gene
+    list(logCPM = x, cpm = cpm,
+         metadata = bulk$metadata[colnames(x), , drop = FALSE], mapping = mapping)
+}
+
+
+#' Bulk NicheNet: receiver responses followed by separate sender evidence
+#' receiver_de/sender_de are outputs of prepare_bulk_gene_de(). Contrast
+#' orientation must be Condition versus Reference. All identifiers must use
+#' symbols matching the supplied species-specific NicheNet model.
+#' Activity scores have no significance/FDR interpretation. The prior is unsigned;
+#' a down-response analysis does not establish ligand-mediated repression.
+#'
+#' @param sender_bulk,receiver_bulk Prepared sender and receiver expression
+#'   objects returned by [prepare_bulk_expression()].
+#' @param sender_de,receiver_de Collected sender and receiver differential-
+#'   expression objects returned by [prepare_bulk_gene_de()].
+#' @param ligand_target_matrix Species-matched NicheNet ligand-target matrix.
+#' @param lr_network Species-matched ligand-receptor network containing `from`
+#'   and `to` identifiers or equivalent recognized columns.
+#' @param sender_col,receiver_col Metadata columns identifying sender and
+#'   receiver cell populations.
+#' @param condition_col Metadata and DE-table column identifying conditions.
+#' @param gene_col Gene-symbol annotation column in both prepared objects.
+#' @param reference Reference condition used to validate contrast orientation.
+#' @param directions Character subset of `"up"` and `"down"` receiver
+#'   responses to analyse.
+#' @param cpm_cutoff,min_fraction,min_replicates Expression-availability
+#'   threshold, required sample fraction, and minimum replicates per context.
+#' @param fdr_cutoff,logfc_cutoff Receiver and sender DE thresholds used to
+#'   define responsive genes and annotate evidence.
+#' @param min_targets,min_background Minimum responsive target-set and measured
+#'   background sizes required for a context.
+#' @param top_ligands Maximum ligand rankings retained per context.
+#' @param prior_top_n Number of prior-weighted targets requested from NicheNet
+#'   before final truncation.
+#' @param targets_per_ligand Maximum weighted target links retained per ligand.
+#' @param verbose Logical scalar. Whether to report progress and context QC.
+#'
+#' @return A list containing ligand activities, sender-expression evidence,
+#'   receptor evidence, weighted targets, QC, receiver gene sets and
+#'   backgrounds, sender/receiver gene mappings, and complete settings.
+#' @export
+run_bulk_nichenet <- function(
+    sender_bulk, receiver_bulk, sender_de, receiver_de,
+    ligand_target_matrix, lr_network,
+    sender_col = "ATM_subtype", receiver_col = "Sorting",
+    condition_col = "Condition", gene_col = "gene_name", reference = "ND",
+    directions = c("up", "down"), cpm_cutoff = 1, min_fraction = 0.5,
+    min_replicates = 2L, fdr_cutoff = 0.05, logfc_cutoff = 0,
+    min_targets = 10L, min_background = 100L, top_ligands = 30L,
+    prior_top_n = 250L, targets_per_ligand = 20L, verbose = TRUE
+) {
+    if (!requireNamespace("nichenetr", quietly = TRUE)) stop("Package nichenetr is required.")
+    scalar <- function(x, lower, upper = Inf, integer = FALSE) {
+        is.numeric(x) && length(x) == 1L && is.finite(x) &&
+            x >= lower && x <= upper && (!integer || x == floor(x))
+    }
+    if (!scalar(cpm_cutoff, 0) || cpm_cutoff == 0 || !scalar(min_fraction, 0, 1) ||
+        min_fraction == 0 || !scalar(fdr_cutoff, 0, 1) || !scalar(logfc_cutoff, 0) ||
+        !all(vapply(list(min_replicates, min_targets, min_background, top_ligands,
+                        prior_top_n, targets_per_ligand), scalar, logical(1), lower = 1, integer = TRUE))) {
+        stop("Invalid expression, DE, or size thresholds.")
+    }
+    if (length(reference) != 1L || is.na(reference) || !nzchar(reference) ||
+        !length(directions) || anyNA(directions) || !all(directions %in% c("up", "down"))) {
+        stop("Supply a reference and directions chosen from up/down.")
+    }
+    directions <- unique(directions)
+    if (!is.matrix(ligand_target_matrix) || !is.numeric(ligand_target_matrix) ||
+        is.null(rownames(ligand_target_matrix)) || is.null(colnames(ligand_target_matrix)) ||
+        anyDuplicated(rownames(ligand_target_matrix)) || anyDuplicated(colnames(ligand_target_matrix))) {
+        stop("ligand_target_matrix must be numeric, with unique targets in rows and ligands in columns.")
+    }
+    if (!all(c("from", "to") %in% names(lr_network))) stop("lr_network needs from/to columns.")
+    lr <- unique(data.frame(Ligand = as.character(lr_network$from),
+                            Receptor = as.character(lr_network$to)))
+    lr <- lr[!is.na(lr$Ligand) & !is.na(lr$Receptor) &
+             nzchar(lr$Ligand) & nzchar(lr$Receptor), , drop = FALSE]
+    s <- prepare_bulk_signaling_expression(sender_bulk, gene_col)
+    r <- prepare_bulk_signaling_expression(receiver_bulk, gene_col)
+    validate_metadata <- function(x, population_col) {
+        cols <- c(population_col, condition_col)
+        if (!all(cols %in% names(x$metadata))) stop("Missing metadata: ", paste(cols, collapse = ", "))
+        if (anyNA(x$metadata[, cols, drop = FALSE]) ||
+            any(vapply(x$metadata[, cols, drop = FALSE], function(z) any(!nzchar(as.character(z))), logical(1)))) {
+            stop("Population/condition metadata contain missing labels.")
+        }
+    }
+    validate_metadata(s, sender_col)
+    validate_metadata(r, receiver_col)
+    validate_de <- function(z) {
+        needed <- c("Gene", "Subtype", "Condition", "Reference", "logFC", "FDR", "ResultName")
+        if (!is.list(z) || !all(c("table", "comparison_info") %in% names(z)) ||
+            !all(needed %in% names(z$table)) ||
+            !all(c("Subtype", "Condition", "Reference", "ResultName") %in% names(z$comparison_info))) {
+            stop("DE inputs must come from prepare_bulk_gene_de().")
+        }
+        key <- z$comparison_info[, c("Subtype", "Condition", "Reference"), drop = FALSE]
+        if (anyDuplicated(key)) stop("Duplicate population/condition/reference contrasts.")
+        if (anyDuplicated(z$table[, c("ResultName", "Gene"), drop = FALSE])) stop("Duplicate DE gene symbols.")
+    }
+    validate_de(sender_de)
+    validate_de(receiver_de)
+    info <- receiver_de$comparison_info
+    info <- info[info$Reference == reference & info$Condition != reference, , drop = FALSE]
+    if (!nrow(info)) stop("No receiver contrasts against ", reference)
+    senders <- unique(as.character(s$metadata[[sender_col]]))
+    # Validate every requested group before making any predictions.
+    group_summary <- function(x, population_col, population, condition) {
+        take <- as.character(x$metadata[[population_col]]) == population &
+            as.character(x$metadata[[condition_col]]) == condition
+        n <- sum(take)
+        if (n < min_replicates) stop("Insufficient samples: ", population, " / ", condition)
+        fraction <- rowMeans(x$cpm[, take, drop = FALSE] >= cpm_cutoff)
+        data.frame(Gene = rownames(x$cpm), MeanLogCPM = rowMeans(x$logCPM[, take, drop = FALSE]),
+                   Fraction = fraction, Expressed = fraction >= min_fraction, N = n,
+                   row.names = rownames(x$cpm))
+    }
+    sender_summaries <- list()
+    for (condition in unique(c(reference, as.character(info$Condition)))) {
+        sender_summaries[[condition]] <- setNames(lapply(senders, function(population) {
+            group_summary(s, sender_col, population, condition)
+        }), senders)
+    }
+    for (i in seq_len(nrow(info))) {
+        group_summary(r, receiver_col, as.character(info$Subtype[i]), reference)
+        group_summary(r, receiver_col, as.character(info$Subtype[i]), as.character(info$Condition[i]))
+        for (sender in senders) {
+            si <- sender_de$comparison_info
+            if (sum(si$Subtype == sender & si$Condition == info$Condition[i] & si$Reference == reference) != 1L) {
+                stop("Missing sender DE contrast: ", sender, " / ", info$Condition[i], " vs ", reference)
+            }
+        }
+    }
+    activities <- sender_evidence <- receptor_evidence <- targets <- qcs <- list()
+    gene_sets <- backgrounds <- list()
+    bind <- function(z) if (length(z)) { out <- do.call(rbind, z); rownames(out) <- NULL; out } else data.frame()
+    add_de <- function(x, de, prefix) {
+        j <- match(x$Gene, de$Gene)
+        x[[paste0(prefix, "_logFC")]] <- de$logFC[j]
+        x[[paste0(prefix, "_FDR")]] <- de$FDR[j]
+        x
+    }
+    for (i in seq_len(nrow(info))) {
+        receiver <- as.character(info$Subtype[i])
+        condition <- as.character(info$Condition[i])
+        result_name <- as.character(info$ResultName[i])
+        rn <- group_summary(r, receiver_col, receiver, reference)
+        rc <- group_summary(r, receiver_col, receiver, condition)
+        rd <- receiver_de$table[receiver_de$table$ResultName == result_name, , drop = FALSE]
+        background <- intersect(rd$Gene, rownames(rn)[rn$Expressed | rc$Expressed])
+        background <- intersect(background, rownames(ligand_target_matrix))
+        receptors <- rownames(rn)[rn$Expressed | rc$Expressed]
+        expressed_ligands <- unique(unlist(lapply(senders, function(sender) {
+            sn <- sender_summaries[[reference]][[sender]]
+            sc <- sender_summaries[[condition]][[sender]]
+            rownames(sn)[sn$Expressed | sc$Expressed]
+        }), use.names = FALSE))
+        potential <- intersect(intersect(lr$Ligand[lr$Receptor %in% receptors], expressed_ligands),
+                               colnames(ligand_target_matrix))
+        for (direction in directions) {
+            key <- paste(result_name, direction, sep = "::")
+            significant <- !is.na(rd$FDR) & rd$FDR < fdr_cutoff &
+                (if (direction == "up") rd$logFC > logfc_cutoff else rd$logFC < -logfc_cutoff)
+            selected <- rd$Gene[significant]
+            geneset <- intersect(selected, background)
+            gene_sets[[key]] <- geneset
+            backgrounds[[key]] <- background
+            reason <- if (length(background) < min_background) "insufficient_background" else
+                if (length(geneset) < min_targets) "insufficient_targets" else
+                if (!length(potential)) "no_potential_ligands" else "ok"
+            qcs[[length(qcs) + 1L]] <- data.frame(Receiver = receiver, Condition = condition,
+                Reference = reference, Response = direction, ResultName = result_name,
+                Selected_DE = length(selected), Targets = length(geneset),
+                Excluded_DE = length(setdiff(selected, geneset)), Background = length(background),
+                Potential_ligands = length(potential), Status = reason)
+            if (verbose) message(receiver, " / ", condition, " / ", direction, ": ", reason,
+                                 " (", length(geneset), " targets; ", length(potential), " ligands)")
+            if (reason != "ok") next
+            if (any(!is.finite(ligand_target_matrix[background, potential, drop = FALSE]))) {
+                stop("Non-finite ligand-target weights in requested model subset.")
+            }
+            a <- as.data.frame(nichenetr::predict_ligand_activities(
+                geneset = geneset, background_expressed_genes = background,
+                ligand_target_matrix = ligand_target_matrix, potential_ligands = potential, single = TRUE))
+            if (!all(c("test_ligand", "aupr_corrected") %in% names(a))) stop("Unexpected NicheNet activity columns.")
+            a <- a[order(-a$aupr_corrected, as.character(a$test_ligand), na.last = TRUE), , drop = FALSE]
+            a$Ligand <- as.character(a$test_ligand)
+            a$Rank <- seq_len(nrow(a))
+            a$Receiver <- receiver
+            a$Condition <- condition
+            a$Reference <- reference
+            a$Response <- direction
+            a$ResultName <- result_name
+            activities[[length(activities) + 1L]] <- a
+            for (sender in senders) {
+                sn <- sender_summaries[[reference]][[sender]]
+                sc <- sender_summaries[[condition]][[sender]]
+                present <- a$Ligand %in% rownames(sn)[sn$Expressed | sc$Expressed]
+                se <- a[present, , drop = FALSE]
+                if (!nrow(se)) next
+                se$Sender <- sender
+                se$Gene <- se$Ligand
+                j <- match(se$Ligand, sn$Gene)
+                se$Ligand_mean_logCPM_reference <- sn$MeanLogCPM[j]
+                se$Ligand_mean_logCPM_condition <- sc$MeanLogCPM[j]
+                se$Ligand_fraction_reference <- sn$Fraction[j]
+                se$Ligand_fraction_condition <- sc$Fraction[j]
+                se$Ligand_expressed_reference <- sn$Expressed[j]
+                se$Ligand_expressed_condition <- sc$Expressed[j]
+                sd <- sender_de$table[sender_de$table$Subtype == sender &
+                    sender_de$table$Condition == condition & sender_de$table$Reference == reference, , drop = FALSE]
+                se <- add_de(se, sd, "Ligand")
+                sender_evidence[[length(sender_evidence) + 1L]] <- se
+            }
+            links <- lr[lr$Ligand %in% a$Ligand & lr$Receptor %in% receptors, , drop = FALSE]
+            links$Gene <- links$Receptor
+            j <- match(links$Receptor, rn$Gene)
+            links$Receptor_mean_logCPM_reference <- rn$MeanLogCPM[j]
+            links$Receptor_mean_logCPM_condition <- rc$MeanLogCPM[j]
+            links$Receptor_fraction_reference <- rn$Fraction[j]
+            links$Receptor_fraction_condition <- rc$Fraction[j]
+            links$Receptor_expressed_reference <- rn$Expressed[j]
+            links$Receptor_expressed_condition <- rc$Expressed[j]
+            links <- add_de(links, rd, "Receptor")
+            links$Receiver <- receiver
+            links$Condition <- condition
+            links$Reference <- reference
+            links$Response <- direction
+            links$ResultName <- result_name
+            receptor_evidence[[length(receptor_evidence) + 1L]] <- links
+            for (ligand in head(a$Ligand, top_ligands)) {
+                lt <- as.data.frame(nichenetr::get_weighted_ligand_target_links(
+                    ligand = ligand, geneset = geneset, ligand_target_matrix = ligand_target_matrix,
+                    n = prior_top_n))
+                if (!all(c("target", "weight") %in% names(lt))) stop("Unexpected NicheNet target columns.")
+                lt <- lt[!is.na(lt$target) & is.finite(lt$weight), , drop = FALSE]
+                lt <- head(lt[order(-lt$weight), , drop = FALSE], targets_per_ligand)
+                if (!nrow(lt)) next
+                lt$Ligand <- ligand
+                lt$Gene <- as.character(lt$target)
+                lt <- add_de(lt, rd, "Target")
+                lt$Receiver <- receiver
+                lt$Condition <- condition
+                lt$Reference <- reference
+                lt$Response <- direction
+                lt$ResultName <- result_name
+                targets[[length(targets) + 1L]] <- lt
+            }
+        }
+    }
+    list(activities = bind(activities), sender_evidence = bind(sender_evidence),
+         receptor_evidence = bind(receptor_evidence), targets = bind(targets), qc = bind(qcs),
+         gene_sets = gene_sets, backgrounds = backgrounds,
+         gene_mapping = list(sender = s$mapping, receiver = r$mapping),
+         settings = list(sender_col = sender_col, receiver_col = receiver_col,
+             condition_col = condition_col, reference = reference, directions = directions,
+             cpm_cutoff = cpm_cutoff, min_fraction = min_fraction, min_replicates = min_replicates,
+             fdr_cutoff = fdr_cutoff, logfc_cutoff = logfc_cutoff, min_targets = min_targets,
+             min_background = min_background, top_ligands = top_ligands,
+             prior_top_n = prior_top_n, targets_per_ligand = targets_per_ligand,
+             nichenetr_version = as.character(utils::packageVersion("nichenetr"))))
+}
+
+
+#' Heatmap of receiver-level ligand rankings; missing contexts remain NA
+#' No FDR stars: corrected AUPR is a prediction score, not a DE test.
+#'
+#' @param result Output returned by [run_bulk_nichenet()].
+#' @param response Receiver response direction, either `"up"` or `"down"`.
+#' @param receiver_order `NULL` or an explicit receiver display order.
+#' @param condition_order Explicit condition display order.
+#' @param top_n Positive integer limiting ligands by their best corrected AUPR.
+#' @param color Heatmap colour vector with at least two colours.
+#' @param receiver_colors,condition_colors `NULL` or named annotation colour
+#'   vectors covering the displayed receiver and condition levels.
+#' @param save `NULL` or a filename written by `pheatmap`.
+#' @param width,height Saved heatmap dimensions in inches.
+#'
+#' @return Invisibly returns a list containing the activity matrix, column
+#'   annotation data frame, and `pheatmap` plot object.
+#' @export
+plot_bulk_nichenet_activity <- function(
+    result, response = c("up", "down"), receiver_order = NULL,
+    condition_order = c("2W", "1M", "2M"), top_n = 25L,
+    color = BULK_NICHENET_ACTIVITY_COLORS,
+    receiver_colors = NULL, condition_colors = NULL, save = NULL,
+    width = 11, height = 8
+) {
+    if (!requireNamespace("pheatmap", quietly = TRUE)) stop("Package pheatmap is required.")
+    response <- match.arg(response)
+    a <- result$activities
+    if (!all(c("Receiver", "Condition", "Response", "Ligand", "aupr_corrected") %in% names(a))) {
+        stop("No activity results; inspect result$qc.")
+    }
+    if (length(top_n) != 1L || !is.finite(top_n) || top_n < 1 || top_n != floor(top_n)) stop("Invalid top_n.")
+    if (!is.character(color) || length(color) < 2L) stop("color must be a vector of colors.")
+    a <- a[a$Response == response, , drop = FALSE]
+    if (is.null(receiver_order)) receiver_order <- unique(as.character(result$qc$Receiver))
+    if (anyDuplicated(receiver_order) || anyDuplicated(condition_order)) stop("Duplicate display labels.")
+    info <- expand.grid(Condition = condition_order, Receiver = receiver_order,
+                        stringsAsFactors = FALSE)
+    info$Key <- paste(info$Receiver, info$Condition, sep = " / ")
+    a$Key <- paste(a$Receiver, a$Condition, sep = " / ")
+    a <- a[a$Key %in% info$Key & is.finite(a$aupr_corrected), , drop = FALSE]
+    if (!nrow(a)) stop("No finite activity scores for requested contexts.")
+    best <- tapply(a$aupr_corrected, a$Ligand, max)
+    ligands <- head(names(sort(best, decreasing = TRUE)), top_n)
+    mat <- matrix(NA_real_, length(ligands), nrow(info), dimnames = list(ligands, info$Key))
+    take <- a$Ligand %in% ligands
+    if (anyDuplicated(a[take, c("Ligand", "Key"), drop = FALSE])) stop("Duplicate activity contexts.")
+    mat[cbind(match(a$Ligand[take], ligands), match(a$Key[take], info$Key))] <- a$aupr_corrected[take]
+    annotation <- info[, c("Receiver", "Condition"), drop = FALSE]
+    rownames(annotation) <- info$Key
+    anno_colors <- list()
+    if (!is.null(receiver_colors)) anno_colors$Receiver <- receiver_colors
+    if (!is.null(condition_colors)) anno_colors$Condition <- condition_colors
+    if (!length(anno_colors)) anno_colors <- NA
+    p <- pheatmap::pheatmap(mat, color = color, cluster_rows = FALSE, cluster_cols = FALSE,
+        annotation_col = annotation, annotation_colors = anno_colors, na_col = "#DDDDDD",
+        main = paste0("NicheNet corrected AUPR: ASC ", response, " response"),
+        border_color = NA, filename = if (is.null(save)) NA else save, width = width, height = height)
+    invisible(list(matrix = mat, annotation = annotation, plot = p))
+}
+
+
+#' General gene-name heatmap from prepare_bulk_expression() output
+#' Uses existing normalized logCPM; never recalculates normalization or DE.
+#' Means are means of logCPM, calculated before optional row standardization.
+#' Duplicate symbols use highest mean logCPM across all input samples.
+#' color accepts a color vector or a numeric-to-color function (colorRamp2).
+#'
+#' @param bulk A prepared expression object returned by
+#'   [prepare_bulk_expression()].
+#' @param genes Character vector of requested gene symbols in display order.
+#' @param gene_col Gene-symbol column in `bulk$genes`.
+#' @param samples `NULL` for all samples or a character vector of sample IDs.
+#' @param column_mode `"samples"` for individual columns or `"mean"` for
+#'   metadata-group means.
+#' @param group_by Metadata columns defining mean-expression groups.
+#' @param column_order Named list defining level order for grouping variables.
+#' @param annotation_cols Metadata columns displayed above sample columns.
+#' @param annotation_colors `NULL` or a named list of annotation colour maps.
+#' @param annotation_row `NULL` or a data frame aligned to resolved gene rows.
+#' @param scale Either `"row"` for gene-wise z-scores or `"none"` for logCPM.
+#' @param cluster_rows,cluster_cols Logical scalars controlling hierarchical
+#'   clustering of rows and columns.
+#' @param distance Correlation or Euclidean clustering distance.
+#' @param correlation_method Pearson or Spearman method used for correlation
+#'   distance.
+#' @param clustering_method Linkage method passed to [stats::hclust()].
+#' @param color A colour vector or numeric-to-colour mapping function.
+#' @param value_limit `NULL` or a positive symmetric colour-scale limit.
+#' @param show_colnames Logical scalar. Whether to display column labels.
+#' @param fontsize_row,fontsize_col Row and column label sizes.
+#' @param title `NULL` or a heatmap title.
+#' @param width,height Saved figure dimensions in inches; `NULL` height adapts
+#'   to the number of genes.
+#' @param save `NULL` or a PDF, PNG, TIFF, JPEG, or BMP output path.
+#' @param legend_extra_width_mm Non-negative extra width reserved for legends.
+#' @param genes_of_interest `NULL` or requested genes to emphasize in row labels.
+#' @param show_rownames Logical scalar. Whether to display gene labels.
+#' @param show_row_dendrogram,show_col_dendrogram Logical scalars controlling
+#'   dendrogram visibility independently of clustering.
+#'
+#' @return Invisibly returns a list containing the `pheatmap` object and, when
+#'   requested and computable, row and column `hclust` trees.
+#' @export
+plot_bulk_expression_heatmap <- function(
+    bulk,
+    genes,
+    gene_col = "gene_name",
+    samples = NULL,
+    column_mode = c("samples", "mean"),
+    group_by = NULL,
+    column_order = list(),
+    annotation_cols = group_by,
+    annotation_colors = NULL,
+    annotation_row = NULL,
+    scale = c("row", "none"),
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    distance = c("correlation", "euclidean"),
+    correlation_method = c("pearson", "spearman"),
+    clustering_method = "ward.D2",
+    color = BULK_ACTIVITY_DIVERGING_COLORS,
+    value_limit = NULL,
+    show_colnames = TRUE,
+    fontsize_row = 9,
+    fontsize_col = 9,
+    title = NULL,
+    width = 10,
+    height = NULL,
+    save = NULL,
+    legend_extra_width_mm = 8,
+    genes_of_interest = NULL,
+    show_rownames = TRUE,
+    show_row_dendrogram = TRUE,
+    show_col_dendrogram = TRUE
+) {
+
+    if (!requireNamespace("pheatmap", quietly = TRUE)) {
+        stop("Package pheatmap is required.")
+    }
+
+    column_mode <- match.arg(column_mode)
+    scale <- match.arg(scale)
+    distance <- match.arg(distance)
+    correlation_method <- match.arg(correlation_method)
+
+    if (!clustering_method %in% c(
+        "ward.D", "ward.D2", "single", "complete",
+        "average", "mcquitty", "median", "centroid"
+    )) {
+        stop("Invalid clustering_method.")
+    }
+
+    for (flag in list(
+        cluster_rows, cluster_cols, show_colnames, show_rownames,
+        show_row_dendrogram, show_col_dendrogram
+    )) {
+        if (!is.logical(flag) || length(flag) != 1L || is.na(flag)) {
+            stop("Clustering/display flags must be TRUE/FALSE.")
+        }
+    }
+
+    if (
+        !is.character(genes) ||
+        !length(genes) ||
+        anyNA(genes) ||
+        any(!nzchar(trimws(genes)))
+    ) {
+        stop("genes must be a nonempty character vector of gene names.")
+    }
+
+    genes <- unique(trimws(genes))
+
+    # Optional highlighting; these genes must also be included in `genes`.
+    # A character vector or a list of character vectors is accepted.
+    if (!is.null(genes_of_interest)) {
+        genes_of_interest <- unlist(genes_of_interest, use.names = FALSE)
+        if (!is.character(genes_of_interest) ||
+            anyNA(genes_of_interest) ||
+            any(!nzchar(trimws(genes_of_interest)))) {
+            stop("genes_of_interest must contain nonempty gene names.")
+        }
+        genes_of_interest <- unique(trimws(genes_of_interest))
+    }
+
+    if (
+        !is.numeric(width) ||
+        length(width) != 1L ||
+        !is.finite(width) ||
+        width <= 0
+    ) {
+        stop("width must be a positive number in inches.")
+    }
+
+    if (!is.null(height)) {
+        if (
+            !is.numeric(height) ||
+            length(height) != 1L ||
+            !is.finite(height) ||
+            height <= 0
+        ) {
+            stop("height must be a positive number in inches.")
+        }
+    }
+
+    if (
+        !is.numeric(legend_extra_width_mm) ||
+        length(legend_extra_width_mm) != 1L ||
+        !is.finite(legend_extra_width_mm) ||
+        legend_extra_width_mm < 0
+    ) {
+        stop("legend_extra_width_mm must be a nonnegative number.")
+    }
+
+    if (!is.null(save)) {
+        if (
+            !is.character(save) ||
+            length(save) != 1L ||
+            is.na(save) ||
+            !nzchar(save)
+        ) {
+            stop("save must be a single file path.")
+        }
+
+        extension <- tolower(tools::file_ext(save))
+
+        if (!extension %in% c(
+            "pdf", "png", "tiff", "tif", "jpeg", "jpg", "bmp"
+        )) {
+            stop(
+                "save must end in .pdf, .png, .tiff, ",
+                ".tif, .jpeg, .jpg or .bmp."
+            )
+        }
+    }
+
+    # Validate expression data and annotation
+    if (!all(c("logCPM", "metadata", "genes") %in% names(bulk))) {
+        stop("Use prepare_bulk_expression() output.")
+    }
+
+    x <- bulk$logCPM
+
+    if (
+        !is.matrix(x) ||
+        !is.numeric(x) ||
+        any(!is.finite(x)) ||
+        is.null(rownames(x)) ||
+        is.null(colnames(x)) ||
+        anyDuplicated(rownames(x)) ||
+        anyDuplicated(colnames(x))
+    ) {
+        stop("Invalid logCPM matrix.")
+    }
+
+    if (
+        !gene_col %in% names(bulk$genes) ||
+        !all(rownames(x) %in% rownames(bulk$genes)) ||
+        anyDuplicated(rownames(bulk$genes))
+    ) {
+        stop("Invalid gene annotation alignment.")
+    }
+
+    meta <- as.data.frame(bulk$metadata)
+
+    if (
+        anyDuplicated(rownames(meta)) ||
+        !all(colnames(x) %in% rownames(meta))
+    ) {
+        stop("Metadata sample IDs do not match.")
+    }
+
+    # Select and order samples
+    if (is.null(samples)) {
+        samples <- colnames(x)
+    }
+
+    if (
+        !is.character(samples) ||
+        !length(samples) ||
+        anyNA(samples) ||
+        anyDuplicated(samples) ||
+        !all(samples %in% colnames(x))
+    ) {
+        stop("samples must contain unique, available sample IDs.")
+    }
+
+    meta <- meta[samples, , drop = FALSE]
+
+    if (column_mode == "mean" && !length(group_by)) {
+        stop("Mean columns require group_by.")
+    }
+
+    if (
+        !is.list(column_order) ||
+        (
+            length(column_order) &&
+            (
+                is.null(names(column_order)) ||
+                anyDuplicated(names(column_order)) ||
+                any(!nzchar(names(column_order)))
+            )
+        )
+    ) {
+        stop("column_order must be a named list of metadata level orders.")
+    }
+
+    needed <- unique(c(
+        group_by,
+        annotation_cols,
+        names(column_order)
+    ))
+
+    if (!all(needed %in% names(meta))) {
+        stop(
+            "Missing metadata columns: ",
+            paste(setdiff(needed, names(meta)), collapse = ", ")
+        )
+    }
+
+    for (column in unique(c(group_by, names(column_order)))) {
+        if (anyNA(meta[[column]])) {
+            stop("Missing grouping/ordering labels in ", column)
+        }
+    }
+
+    for (column in names(column_order)) {
+
+        levels <- as.character(column_order[[column]])
+
+        if (
+            !length(levels) ||
+            anyNA(levels) ||
+            anyDuplicated(levels) ||
+            !all(as.character(meta[[column]]) %in% levels)
+        ) {
+            stop("Incomplete or invalid column_order for ", column)
+        }
+
+        meta[[column]] <- factor(
+            as.character(meta[[column]]),
+            levels = levels
+        )
+    }
+
+    order_cols <- unique(c(names(column_order), group_by))
+
+    if (length(order_cols)) {
+        ord <- do.call(
+            order,
+            c(
+                unname(as.list(meta[, order_cols, drop = FALSE])),
+                list(na.last = TRUE)
+            )
+        )
+
+        meta <- meta[ord, , drop = FALSE]
+    }
+
+    # Match gene symbols
+    # For duplicated symbols, retain the gene ID with highest mean logCPM
+    symbols <- trimws(
+        as.character(bulk$genes[rownames(x), gene_col])
+    )
+
+    idx <- which(!is.na(symbols) & symbols %in% genes)
+
+    idx <- idx[
+        order(-rowMeans(x)[idx], rownames(x)[idx])
+    ]
+
+    idx <- idx[!duplicated(symbols[idx])]
+
+    missing <- setdiff(genes, symbols[idx])
+
+    if (length(missing)) {
+        warning(
+            "Genes not found: ",
+            paste(missing, collapse = ", "),
+            call. = FALSE
+        )
+    }
+
+    if (!length(idx)) {
+        stop("None of the requested gene names were found.")
+    }
+
+    idx <- idx[
+        match(
+            genes[genes %in% symbols[idx]],
+            symbols[idx]
+        )
+    ]
+
+    mapping <- data.frame(
+        Gene = symbols[idx],
+        GeneID = rownames(x)[idx]
+    )
+
+    mat <- x[idx, rownames(meta), drop = FALSE]
+    rownames(mat) <- symbols[idx]
+
+    sample_groups <- data.frame(
+        Sample = rownames(meta),
+        Column = rownames(meta)
+    )
+
+    # Optionally average samples within metadata groups
+    if (column_mode == "mean") {
+
+        codes <- lapply(
+            meta[, group_by, drop = FALSE],
+            function(z) {
+                match(as.character(z), unique(as.character(z)))
+            }
+        )
+
+        key <- do.call(
+            interaction,
+            c(codes, list(drop = TRUE, lex.order = TRUE))
+        )
+
+        groups <- unique(as.character(key))
+
+        positions <- lapply(
+            groups,
+            function(z) which(as.character(key) == z)
+        )
+
+        mat <- do.call(
+            cbind,
+            lapply(
+                positions,
+                function(j) {
+                    rowMeans(mat[, j, drop = FALSE])
+                }
+            )
+        )
+
+        rownames(mat) <- mapping$Gene
+
+        labels <- vapply(
+            positions,
+            function(j) {
+                paste(
+                    as.character(
+                        unlist(meta[j[1], group_by, drop = FALSE])
+                    ),
+                    collapse = " / "
+                )
+            },
+            character(1)
+        )
+
+        labels <- make.unique(labels)
+        colnames(mat) <- labels
+
+        for (column in annotation_cols) {
+
+            varies <- vapply(
+                positions,
+                function(j) {
+                    length(unique(meta[[column]][j])) != 1L
+                },
+                logical(1)
+            )
+
+            if (any(varies)) {
+                stop(
+                    "Annotation ", column,
+                    " varies within groups; include it in ",
+                    "group_by or remove it."
+                )
+            }
+        }
+
+        sample_groups$Column <- labels[
+            match(as.character(key), groups)
+        ]
+
+        meta <- meta[
+            vapply(positions, `[`, integer(1), 1L),
+            ,
+            drop = FALSE
+        ]
+
+        rownames(meta) <- labels
+    }
+
+    expression_matrix <- mat
+
+    # Remove constant genes when scaling/correlation requires variation
+    constant <- if (ncol(mat) > 1L) {
+        rownames(mat)[apply(mat, 1, stats::sd) == 0]
+    } else {
+        character()
+    }
+
+    if (
+        scale == "row" ||
+        (cluster_rows && distance == "correlation")
+    ) {
+        if (length(constant)) {
+            warning(
+                "Constant genes excluded: ",
+                paste(constant, collapse = ", "),
+                call. = FALSE
+            )
+
+            mat <- mat[
+                !rownames(mat) %in% constant,
+                ,
+                drop = FALSE
+            ]
+        }
+    }
+
+    if (!nrow(mat)) {
+        stop("No variable genes remain for this heatmap.")
+    }
+
+    # Row z-scores
+    if (scale == "row") {
+
+        if (ncol(mat) < 2L) {
+            stop("Row scaling requires at least two columns.")
+        }
+
+        mat <- t(base::scale(t(mat)))
+    }
+
+    # Construct clustering trees
+    make_tree <- function(z, enabled) {
+
+        if (!enabled || nrow(z) < 2L) {
+            return(FALSE)
+        }
+
+        if (distance == "euclidean") {
+
+            d <- stats::dist(z)
+
+        } else {
+
+            if (
+                ncol(z) < 2L ||
+                any(apply(z, 1, stats::sd) == 0)
+            ) {
+                warning(
+                    "Correlation clustering disabled for profiles ",
+                    "with insufficient variation.",
+                    call. = FALSE
+                )
+
+                return(FALSE)
+            }
+
+            rho <- stats::cor(
+                t(z),
+                method = correlation_method
+            )
+
+            dmat <- 1 - rho
+            dmat[dmat < 0] <- 0
+            diag(dmat) <- 0
+
+            d <- stats::as.dist(dmat)
+        }
+
+        if (any(!is.finite(d))) {
+            stop("Non-finite clustering distances.")
+        }
+
+        stats::hclust(d, method = clustering_method)
+    }
+
+    row_tree <- make_tree(mat, cluster_rows)
+    col_tree <- make_tree(t(mat), cluster_cols)
+
+    # Color limits
+    if (!is.null(value_limit)) {
+
+        if (
+            !is.numeric(value_limit) ||
+            length(value_limit) != 1L ||
+            !is.finite(value_limit) ||
+            value_limit <= 0
+        ) {
+            stop("Invalid value_limit.")
+        }
+
+        limits <- c(-value_limit, value_limit)
+
+    } else {
+
+        limits <- range(mat)
+    }
+
+    if (diff(limits) == 0) {
+        limits <- limits + c(-0.5, 0.5)
+    }
+
+    if (is.function(color)) {
+        color <- color(
+            seq(limits[1], limits[2], length.out = 100)
+        )
+    }
+
+    if (
+        !is.character(color) ||
+        length(color) < 2L ||
+        anyNA(color)
+    ) {
+        stop("Supply a color vector or color function.")
+    }
+
+    grDevices::col2rgb(color)
+
+    # Clip displayed values only; clustering uses the unclipped matrix
+    displayed <- mat
+    displayed[] <- pmax(
+        limits[1],
+        pmin(limits[2], mat)
+    )
+
+    # Align row annotations
+    if (!is.null(annotation_row)) {
+
+        if (
+            !is.data.frame(annotation_row) ||
+            anyDuplicated(rownames(annotation_row)) ||
+            !all(rownames(mat) %in% rownames(annotation_row))
+        ) {
+            stop(
+                "annotation_row must have gene-name rownames ",
+                "covering plotted genes."
+            )
+        }
+
+        annotation_row <- annotation_row[
+            rownames(mat),
+            ,
+            drop = FALSE
+        ]
+    }
+
+    anno <- if (length(annotation_cols)) {
+        meta[, annotation_cols, drop = FALSE]
+    } else {
+        NA
+    }
+
+    if (is.null(height)) {
+        height <- max(4, 2 + 0.18 * nrow(mat))
+    }
+
+    # An interest list overrides show_rownames: only matching genes are labelled.
+    interest_provided <- !is.null(genes_of_interest)
+    row_labels_to_show <- rownames(mat)
+    if (interest_provided) {
+        row_labels_to_show[!rownames(mat) %in% genes_of_interest] <- ""
+    }
+
+    # Build without drawing/exporting, so the legend can be adjusted first
+    p <- pheatmap::pheatmap(
+        displayed,
+        scale = "none",
+        color = color,
+        breaks = seq(
+            limits[1],
+            limits[2],
+            length.out = length(color) + 1L
+        ),
+        cluster_rows = row_tree,
+        cluster_cols = col_tree,
+        treeheight_row = if (show_row_dendrogram) 50 else 0,
+        treeheight_col = if (show_col_dendrogram) 50 else 0,
+        show_rownames = if (interest_provided) TRUE else show_rownames,
+        labels_row = row_labels_to_show,
+        annotation_col = anno,
+        annotation_row = if (is.null(annotation_row)) {
+            NA
+        } else {
+            annotation_row
+        },
+        annotation_colors = if (is.null(annotation_colors)) {
+            NA
+        } else {
+            annotation_colors
+        },
+        border_color = NA,
+        show_colnames = show_colnames,
+        fontsize_row = fontsize_row,
+        fontsize_col = fontsize_col,
+        main = if (is.null(title)) NA else title,
+        filename = NA,
+        silent = TRUE
+    )
+
+    # Colour the labels in their FINAL displayed order, after clustering.
+    # Editing the gtable ensures the colours are preserved in saved files.
+    gt <- p$gtable
+    if (interest_provided) {
+        row_label_idx <- which(gt$layout$name == "row_names")
+        if (length(row_label_idx) != 1L) {
+            stop("Could not locate the heatmap row labels.")
+        }
+        row_labels <- gt$grobs[[row_label_idx]]
+        row_labels$gp$col <- ifelse(
+            as.character(row_labels$label) %in% genes_of_interest,
+            "red",
+            "black"
+        )
+        gt$grobs[[row_label_idx]] <- row_labels
+    }
+
+    # Reserve additional width for the annotation legend
+
+    legend_col <- unique(
+        gt$layout$l[gt$layout$name == "annotation_legend"]
+    )
+
+    matrix_col <- unique(
+        gt$layout$l[gt$layout$name == "matrix"]
+    )
+
+    if (
+        legend_extra_width_mm > 0 &&
+        length(legend_col) == 1L &&
+        length(matrix_col) == 1L &&
+        legend_col != matrix_col
+    ) {
+
+        extra_space <- grid::unit(
+            legend_extra_width_mm,
+            "mm"
+        )
+
+        gt$widths[legend_col] <-
+            gt$widths[legend_col] + extra_space
+
+        gt$widths[matrix_col] <-
+            gt$widths[matrix_col] - extra_space
+    }
+
+    p$gtable <- gt
+
+    # Export the adjusted layout
+    if (!is.null(save)) {
+
+        export_plot <- function() {
+
+            switch(
+                extension,
+                pdf = grDevices::pdf(
+                    file = save,
+                    width = width,
+                    height = height,
+                    useDingbats = FALSE
+                ),
+                png = grDevices::png(
+                    filename = save,
+                    width = width,
+                    height = height,
+                    units = "in",
+                    res = 300
+                ),
+                tiff =,
+                tif = grDevices::tiff(
+                    filename = save,
+                    width = width,
+                    height = height,
+                    units = "in",
+                    res = 300,
+                    compression = "lzw"
+                ),
+                jpeg =,
+                jpg = grDevices::jpeg(
+                    filename = save,
+                    width = width,
+                    height = height,
+                    units = "in",
+                    res = 300,
+                    quality = 100
+                ),
+                bmp = grDevices::bmp(
+                    filename = save,
+                    width = width,
+                    height = height,
+                    units = "in",
+                    res = 300
+                )
+            )
+
+            on.exit(grDevices::dev.off(), add = TRUE)
+
+            grid::grid.newpage()
+            grid::grid.draw(gt)
+        }
+
+        export_plot()
+
+    } else {
+
+        grid::grid.newpage()
+        grid::grid.draw(gt)
+    }
+
+    # Return only the plot and the requested clustering results.
+    # Trees are hclust objects: use cutree() to choose the number of groups.
+    # NULL means clustering was requested but could not be computed.
+    out <- list(plot = p)
+    if (cluster_rows) {
+        out["row_tree"] <- list(
+            if (inherits(row_tree, "hclust")) row_tree else NULL
+        )
+    }
+    if (cluster_cols) {
+        out["column_tree"] <- list(
+            if (inherits(col_tree, "hclust")) col_tree else NULL
+        )
+    }
+    invisible(out)
+}
+
+# =============================================================================
+# Prepare ligand–receptor evidence for plotting
+# =============================================================================
+
+#' Prepare NicheNet ligand-receptor evidence for plotting
+#'
+#' Join ranked ligand activities, sender availability, and receiver receptor
+#' evidence for one receiver and response direction across selected senders and
+#' conditions. Only links involving the top-ranked ligands are retained.
+#'
+#' @param result Output returned by [run_bulk_nichenet()].
+#' @param receiver Single receiver population to retain.
+#' @param response Receiver response direction, either `"up"` or `"down"`.
+#' @param senders `NULL` for all available senders or a character vector of
+#'   sender populations.
+#' @param conditions Character vector of experimental conditions.
+#' @param top_n Positive integer number of ranked ligands retained per context.
+#'
+#' @return A long data frame containing ligand-receptor pairs, context keys,
+#'   activity rank and corrected AUPR, sender/receiver expression availability,
+#'   log-fold changes, adjusted p-values, and a printable `Pair` label.
+#' @export
+prepare_bulk_nichenet_lr_plot_data <- function(
+    result,
+    receiver,
+    response = c("up", "down"),
+    senders = NULL,
+    conditions = c("2W", "1M", "2M"),
+    top_n = 10
+) {
+
+    response <- match.arg(response)
+
+    if (!is.character(receiver) || length(receiver) != 1L ||
+        is.na(receiver) || !nzchar(receiver)) {
+        stop("Specify one ASC receiver label.")
+    }
+
+    if (!is.numeric(top_n) || length(top_n) != 1L ||
+        !is.finite(top_n) || top_n < 1 || top_n != floor(top_n)) {
+        stop("top_n must be a positive integer.")
+    }
+
+    if (!length(conditions) || anyNA(conditions) ||
+        anyDuplicated(conditions)) {
+        stop("Provide unique condition labels.")
+    }
+
+    keys <- c(
+        "Ligand", "Receiver", "Condition",
+        "Reference", "Response", "ResultName"
+    )
+
+    sender_columns <- c(
+        keys, "Sender", "Rank", "aupr_corrected",
+        "Ligand_mean_logCPM_condition",
+        "Ligand_expressed_reference",
+        "Ligand_expressed_condition",
+        "Ligand_logFC", "Ligand_FDR"
+    )
+
+    receptor_columns <- c(
+        keys, "Receptor",
+        "Receptor_mean_logCPM_condition",
+        "Receptor_expressed_reference",
+        "Receptor_expressed_condition",
+        "Receptor_logFC", "Receptor_FDR"
+    )
+
+    se <- result$sender_evidence
+    re <- result$receptor_evidence
+
+    if (!is.data.frame(se) ||
+        !all(sender_columns %in% names(se))) {
+        stop("Missing fields in result$sender_evidence.")
+    }
+
+    if (!is.data.frame(re) ||
+        !all(receptor_columns %in% names(re))) {
+        stop("Missing fields in result$receptor_evidence.")
+    }
+
+    if (is.null(senders)) {
+        senders <- unique(as.character(se$Sender))
+    }
+
+    if (!length(senders) || anyNA(senders) || anyDuplicated(senders)) {
+        stop("Provide unique sender labels.")
+    }
+
+    se <- se[
+        se$Receiver == receiver &
+            se$Response == response &
+            se$Condition %in% conditions &
+            se$Sender %in% senders &
+            !is.na(se$Rank) &
+            se$Rank <= top_n,
+        sender_columns,
+        drop = FALSE
+    ]
+
+    re <- re[
+        re$Receiver == receiver &
+            re$Response == response &
+            re$Condition %in% conditions,
+        receptor_columns,
+        drop = FALSE
+    ]
+
+    if (!nrow(se) || !nrow(re)) {
+        stop(
+            "No matching evidence. Check receiver, response, ",
+            "sender labels, conditions, and top_n."
+        )
+    }
+
+    if (anyDuplicated(se[, c(keys, "Sender"), drop = FALSE])) {
+        stop("Duplicate sender evidence identifiers.")
+    }
+
+    if (anyDuplicated(re[, c(keys, "Receptor"), drop = FALSE])) {
+        stop("Duplicate receptor evidence identifiers.")
+    }
+
+    # Each ligand can connect to several receptors and several ATM senders.
+    out <- merge(
+        se,
+        re,
+        by = keys,
+        all = FALSE,
+        sort = FALSE
+    )
+
+    if (!nrow(out)) {
+        stop("No ligand–receptor links matched the selected sender evidence.")
+    }
+
+    numeric_columns <- c(
+        "Rank", "aupr_corrected",
+        "Ligand_mean_logCPM_condition",
+        "Receptor_mean_logCPM_condition",
+        "Ligand_logFC", "Receptor_logFC",
+        "Ligand_FDR", "Receptor_FDR"
+    )
+
+    if (!all(vapply(out[numeric_columns], is.numeric, logical(1)))) {
+        stop("Scores, expression, logFC, and FDR fields must be numeric.")
+    }
+
+    out$Pair <- paste(out$Ligand, out$Receptor, sep = " → ")
+
+    out
+}
+
+
+# =============================================================================
+# Dot plot: separate ligand and receptor expression evidence over HFD
+# =============================================================================
+
+#' Plot NicheNet ligand-receptor expression evidence as paired dot panels
+#'
+#' Display sender ligand and receiver receptor expression evidence for the
+#' top-ranked ligand-receptor pairs, with dot size representing expression and
+#' colour representing differential-expression effect.
+#'
+#' @param result Output returned by [run_bulk_nichenet()].
+#' @param receiver Single receiver population to plot.
+#' @param response Receiver response direction, either `"up"` or `"down"`.
+#' @param sender_order,condition_order Explicit sender and condition orders.
+#' @param top_n Positive integer number of ranked ligands retained per context.
+#' @param fdr_cutoff Numeric FDR threshold used to distinguish supported DE
+#'   evidence in the plotting data.
+#' @param logfc_limit `NULL` or a positive symmetric colour-scale limit.
+#' @param dot_size_range Numeric length-two vector giving minimum and maximum
+#'   dot sizes.
+#' @param color Three-colour vector for negative, neutral, and positive logFC.
+#' @param fontsize Base ggplot2 font size.
+#' @param width,height Saved figure dimensions in inches; `NULL` height adapts
+#'   to the number of pairs and senders.
+#' @param save `NULL` or a figure output path.
+#' @param draw Logical scalar. Whether to print the plot on the active device.
+#'
+#' @return Invisibly returns a list containing the ggplot object, long plotting
+#'   data, joined ligand-receptor evidence, and displayed pair order.
+#' @export
+plot_bulk_nichenet_lr_dotplot <- function(
+    result,
+    receiver,
+    response = c("up", "down"),
+    sender_order = c("pATM", "cATM", "sATM"),
+    condition_order = c("2W", "1M", "2M"),
+    top_n = 10,
+
+    fdr_cutoff = 0.05,
+    logfc_limit = NULL,
+    dot_size_range = c(1.5, 6),
+
+    color = BULK_SIGNALING_DIVERGING_COLORS,
+
+    fontsize = 10,
+    width = 11,
+    height = NULL,
+    save = NULL,
+    draw = TRUE
+) {
+
+    if (!requireNamespace("ggplot2", quietly = TRUE)) {
+        stop("Package ggplot2 is required.")
+    }
+
+    response <- match.arg(response)
+
+    if (!is.numeric(fdr_cutoff) || length(fdr_cutoff) != 1L ||
+        !is.finite(fdr_cutoff) || fdr_cutoff < 0 || fdr_cutoff > 1) {
+        stop("Invalid fdr_cutoff.")
+    }
+
+    if (length(dot_size_range) != 2L ||
+        any(!is.finite(dot_size_range)) ||
+        any(dot_size_range <= 0) ||
+        dot_size_range[1] > dot_size_range[2]) {
+        stop("Invalid dot_size_range.")
+    }
+
+    if (!is.character(color) || length(color) < 2L) {
+        stop("Provide a vector of heatmap colors.")
+    }
+
+    invisible(grDevices::col2rgb(color))
+
+    lr <- prepare_bulk_nichenet_lr_plot_data(
+        result = result,
+        receiver = receiver,
+        response = response,
+        senders = sender_order,
+        conditions = condition_order,
+        top_n = top_n
+    )
+
+    # Order pairs by their highest ligand activity across selected conditions.
+    pair_score <- tapply(
+        lr$aupr_corrected,
+        lr$Pair,
+        function(z) {
+            z <- z[is.finite(z)]
+            if (length(z)) max(z) else -Inf
+        }
+    )
+
+    pair_order <- names(pair_score)[
+        order(-pair_score, names(pair_score))
+    ]
+
+    # Two evidence panels, retaining the same ligand–receptor row identifiers.
+    ligand_data <- lr
+    ligand_data$Evidence <- "ATM ligand"
+    ligand_data$LogFC <- ligand_data$Ligand_logFC
+    ligand_data$FDR <- ligand_data$Ligand_FDR
+    ligand_data$MeanLogCPM <- ligand_data$Ligand_mean_logCPM_condition
+
+    receptor_data <- lr
+    receptor_data$Evidence <- "ASC receptor"
+    receptor_data$LogFC <- receptor_data$Receptor_logFC
+    receptor_data$FDR <- receptor_data$Receptor_FDR
+    receptor_data$MeanLogCPM <- receptor_data$Receptor_mean_logCPM_condition
+
+    plot_data <- rbind(ligand_data, receptor_data)
+
+    plot_data$Pair <- factor(
+        plot_data$Pair,
+        levels = rev(pair_order)
+    )
+
+    plot_data$Condition <- factor(
+        plot_data$Condition,
+        levels = condition_order
+    )
+
+    plot_data$Sender <- factor(
+        plot_data$Sender,
+        levels = sender_order
+    )
+
+    plot_data$Evidence <- factor(
+        plot_data$Evidence,
+        levels = c("ATM ligand", "ASC receptor")
+    )
+
+    plot_data$Significant <- factor(
+        ifelse(
+            !is.na(plot_data$FDR) &
+                plot_data$FDR < fdr_cutoff,
+            "Yes",
+            "No / not tested"
+        ),
+        levels = c("No / not tested", "Yes")
+    )
+
+    plot_data$LogFC[!is.finite(plot_data$LogFC)] <- NA_real_
+
+    if (is.null(logfc_limit)) {
+        finite_fc <- plot_data$LogFC[is.finite(plot_data$LogFC)]
+        logfc_limit <- if (length(finite_fc)) max(abs(finite_fc)) else 1
+        if (logfc_limit == 0) logfc_limit <- 1
+    }
+
+    if (!is.numeric(logfc_limit) || length(logfc_limit) != 1L ||
+        !is.finite(logfc_limit) || logfc_limit <= 0) {
+        stop("logfc_limit must be positive.")
+    }
+
+    # Clip color values only; original logFC remains in returned data.
+    plot_data$PlotLogFC <- pmax(
+        -logfc_limit,
+        pmin(logfc_limit, plot_data$LogFC)
+    )
+
+    p <- ggplot2::ggplot(
+        plot_data,
+        ggplot2::aes(
+            x = Condition,
+            y = Pair
+        )
+    ) +
+        ggplot2::geom_point(
+            ggplot2::aes(
+                fill = PlotLogFC,
+                size = MeanLogCPM,
+                colour = Significant
+            ),
+            shape = 21,
+            stroke = 0.65
+        ) +
+        ggplot2::facet_grid(
+            Sender ~ Evidence,
+            drop = FALSE
+        ) +
+        ggplot2::scale_fill_gradientn(
+            colours = color,
+            limits = c(-logfc_limit, logfc_limit),
+            na.value = "#D9D9D9",
+            name = "Gene logFC"
+        ) +
+        ggplot2::scale_size_continuous(
+            range = dot_size_range,
+            name = "Mean log2 CPM\n(HFD condition)"
+        ) +
+        ggplot2::scale_colour_manual(
+            values = c(
+                "No / not tested" = "#B8B8B8",
+                "Yes" = "#000000"
+            ),
+            name = paste0("Gene FDR < ", fdr_cutoff)
+        ) +
+        ggplot2::scale_x_discrete(drop = FALSE) +
+        ggplot2::labs(
+            x = NULL,
+            y = "Ligand → receptor",
+            title = paste0(
+                receiver, ": ", response, " response"
+            ),
+            subtitle = paste0(
+                "Top ", top_n,
+                " ligands per condition by NicheNet rank; ",
+                "color shows gene expression change"
+            )
+        ) +
+        ggplot2::theme_classic(base_size = fontsize) +
+        ggplot2::theme(
+            panel.grid = ggplot2::element_blank(),
+            panel.border = ggplot2::element_rect(
+                colour = "black",
+                fill = NA,
+                linewidth = 0.4
+            ),
+            strip.background = ggplot2::element_rect(
+                fill = "#F3F3F3",
+                colour = "black"
+            ),
+            axis.text.x = ggplot2::element_text(
+                angle = 45,
+                hjust = 1
+            ),
+            axis.text.y = ggplot2::element_text(
+                colour = "black"
+            ),
+            legend.position = "right"
+        )
+
+    if (is.null(height)) {
+        height <- max(
+            6,
+            2 + length(sender_order) * (0.18 * length(pair_order) + 0.7)
+        )
+    }
+
+    if (!is.null(save)) {
+
+        dir.create(
+            dirname(save),
+            recursive = TRUE,
+            showWarnings = FALSE
+        )
+
+        ggplot2::ggsave(
+            filename = save,
+            plot = p,
+            width = width,
+            height = height,
+            units = "in",
+            dpi = 300,
+            limitsize = FALSE
+        )
+    }
+
+    if (draw) print(p)
+
+    invisible(
+        list(
+            plot = p,
+            data = plot_data,
+            lr_evidence = lr,
+            pair_order = pair_order
+        )
+    )
+}
+
+
+# =============================================================================
+# Connectivity heatmap for one ASC subtype and one HFD condition
+# =============================================================================
+
+#' Plot NicheNet ligand-receptor prior connectivity
+#'
+#' Build a binary ligand-by-receptor matrix for one receiver, condition, and
+#' response direction, with row annotations showing which sender populations
+#' meet the requested ligand-availability rule.
+#'
+#' @param result Output returned by [run_bulk_nichenet()].
+#' @param receiver Single receiver population to display.
+#' @param condition Single experimental condition to display.
+#' @param response Receiver response direction, either `"up"` or `"down"`.
+#' @param sender_order Explicit sender-population order.
+#' @param sender_colors Named colour vector covering `sender_order`.
+#' @param top_n Positive integer number of ranked ligands retained.
+#' @param availability `"condition"` to require condition-specific sender
+#'   expression or `"either"` to allow reference or condition expression.
+#' @param color Two-colour vector for absent and present prior links.
+#' @param fontsize_row,fontsize_col Heatmap row and column label sizes.
+#' @param width,height Saved heatmap dimensions in inches; `NULL` height adapts
+#'   to the number of ligand rows.
+#' @param save `NULL` or a filename written by `pheatmap`.
+#' @param draw Logical scalar. Whether to draw the heatmap on the active device.
+#'
+#' @return Invisibly returns a list containing the `pheatmap` object, binary
+#'   connectivity matrix, sender-availability row annotation, joined evidence,
+#'   and the selected availability rule.
+#' @export
+plot_bulk_nichenet_lr_connectivity <- function(
+    result,
+    receiver,
+    condition,
+    response = c("up", "down"),
+
+    sender_order = c("pATM", "cATM", "sATM"),
+    sender_colors = BULK_NICHENET_SENDER_COLORS,
+
+    top_n = 10,
+    availability = c("condition", "either"),
+
+    color = BULK_NICHENET_CONNECTIVITY_COLORS,
+    fontsize_row = 10,
+    fontsize_col = 10,
+    width = 10,
+    height = NULL,
+    save = NULL,
+    draw = TRUE
+) {
+
+    if (!requireNamespace("pheatmap", quietly = TRUE)) {
+        stop("Package pheatmap is required.")
+    }
+
+    response <- match.arg(response)
+    availability <- match.arg(availability)
+
+    if (!is.character(condition) || length(condition) != 1L ||
+        is.na(condition) || !nzchar(condition)) {
+        stop("Specify one condition.")
+    }
+
+    sender_colors <- unlist(sender_colors)
+
+    if (anyDuplicated(names(sender_colors)) ||
+        !all(sender_order %in% names(sender_colors))) {
+        stop("sender_colors must have unique names covering sender_order.")
+    }
+
+    if (!is.character(color) || length(color) != 2L || anyNA(color)) {
+        stop("Provide two colors: no link, prior link.")
+    }
+
+    invisible(grDevices::col2rgb(c(color, sender_colors)))
+
+    lr <- prepare_bulk_nichenet_lr_plot_data(
+        result = result,
+        receiver = receiver,
+        response = response,
+        senders = sender_order,
+        conditions = condition,
+        top_n = top_n
+    )
+
+    as_flag <- function(z) {
+        z <- as.logical(z)
+        !is.na(z) & z
+    }
+
+    if (availability == "condition") {
+
+        ligand_available <- as_flag(
+            lr$Ligand_expressed_condition
+        )
+
+        receptor_available <- as_flag(
+            lr$Receptor_expressed_condition
+        )
+
+    } else {
+
+        ligand_available <- (
+            as_flag(lr$Ligand_expressed_condition) |
+                as_flag(lr$Ligand_expressed_reference)
+        )
+
+        receptor_available <- (
+            as_flag(lr$Receptor_expressed_condition) |
+                as_flag(lr$Receptor_expressed_reference)
+        )
+    }
+
+    lr <- lr[
+        ligand_available & receptor_available,
+        ,
+        drop = FALSE
+    ]
+
+    if (!nrow(lr)) {
+        stop(
+            "No links satisfy the selected availability rule. ",
+            "Try availability = 'either' or increase top_n."
+        )
+    }
+
+    ligand_rank <- tapply(
+        lr$Rank,
+        lr$Ligand,
+        min
+    )
+
+    ligands <- names(ligand_rank)[
+        order(ligand_rank, names(ligand_rank))
+    ]
+
+    receptors <- sort(unique(as.character(lr$Receptor)))
+
+    mat <- matrix(
+        0,
+        nrow = length(ligands),
+        ncol = length(receptors),
+        dimnames = list(ligands, receptors)
+    )
+
+    pairs <- unique(lr[, c("Ligand", "Receptor")])
+
+    mat[
+        cbind(
+            match(pairs$Ligand, ligands),
+            match(pairs$Receptor, receptors)
+        )
+    ] <- 1
+
+    # Ligand activity is one value per ligand/receiver response,
+    # shared across the possible ATM sources.
+    activity <- vapply(
+        ligands,
+        function(ligand) {
+            values <- unique(
+                lr$aupr_corrected[lr$Ligand == ligand]
+            )
+
+            if (length(values) != 1L) {
+                stop("Inconsistent ligand activity values for ", ligand)
+            }
+
+            values
+        },
+        numeric(1)
+    )
+
+    ann_row <- data.frame(
+        Activity = activity,
+        row.names = ligands
+    )
+
+    ann_colors <- list()
+
+    for (sender in sender_order) {
+
+        available_ligands <- unique(
+            lr$Ligand[lr$Sender == sender]
+        )
+
+        annotation_name <- paste0("Source_", sender)
+
+        ann_row[[annotation_name]] <- factor(
+            ifelse(
+                ligands %in% available_ligands,
+                "Yes",
+                "No"
+            ),
+            levels = c("No", "Yes")
+        )
+
+        ann_colors[[annotation_name]] <- c(
+            No = "#F0F0F0",
+            Yes = unname(sender_colors[sender])
+        )
+    }
+
+    if (is.null(height)) {
+        height <- max(4, 2 + 0.25 * length(ligands))
+    }
+
+    args <- list(
+        mat = mat,
+        color = color,
+        breaks = c(-0.5, 0.5, 1.5),
+
+        cluster_rows = FALSE,
+        cluster_cols = FALSE,
+
+        annotation_row = ann_row,
+        annotation_colors = ann_colors,
+        drop_levels = FALSE,
+
+        legend_breaks = c(0, 1),
+        legend_labels = c(
+            "No prior link",
+            "Prior link"
+        ),
+
+        border_color = "#FFFFFF",
+        fontsize_row = fontsize_row,
+        fontsize_col = fontsize_col,
+        angle_col = "45",
+
+        main = paste0(
+            receiver, " / ", condition,
+            "\nLigand–receptor connectivity: ", response, " response"
+        ),
+
+        silent = TRUE
+    )
+
+    if (!is.null(save)) {
+
+        dir.create(
+            dirname(save),
+            recursive = TRUE,
+            showWarnings = FALSE
+        )
+
+        args$filename <- save
+        args$width <- width
+        args$height <- height
+    }
+
+    p <- do.call(
+        pheatmap::pheatmap,
+        args
+    )
+
+    if (draw) {
+        grid::grid.newpage()
+        grid::grid.draw(p$gtable)
+    }
+
+    invisible(
+        list(
+            plot = p,
+            matrix = mat,
+            annotation_row = ann_row,
+            lr_evidence = lr,
+            availability = availability
+        )
     )
 }

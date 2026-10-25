@@ -332,6 +332,22 @@ functions supplied in R.
 | Gene-program expression heatmap | `plot_gene_set_heatmap()` | Resolves named gene sets from a reusable prepared normalized-expression object, optionally aggregates samples, and displays genes in ordered program slices. | ComplexHeatmap object, displayed and pre-scaled matrices, log2 CPM, gene mapping, missing genes, aligned metadata, row split, colour function, DGEList, and normalization settings. |
 | Differential-expression heatmap | `plot_de_heatmap()` | Selects directional DE genes and displays normalized sample-level expression with optional visualization-only batch correction and marked-gene labels. | ComplexHeatmap object, displayed matrix, corrected expression, selected DE rows, ordered metadata, row split, labels, and colour function. |
 | Differential-expression visualization | `plot_signed_manhattan()` | Displays signed adjusted-p-value significance for every tested gene across comparisons and sorting groups. | Plot, complete plotting data, selected labels, per-panel summary, colours, and cutoff metadata. |
+| TF activity inference | `infer_bulk_tf_activity()` | Infers sample-level transcription-factor activities from prepared expression and a signed regulator-target network. | `bulk_tf_activity` object with activity matrices, coverage, mapping, QC, and provenance. |
+| TF differential activity | `limma_tf_pairwise()` | Tests pairwise TF-activity differences with optional covariates and repeated-measure blocking. | Results, limma fit/design/contrast, selected metadata, and model diagnostics. |
+| TF activity heatmap | `plot_bulk_tf_heatmap()` | Displays significant TF activities across subtype-condition groups or individual samples. | Plot, raw/z-score matrices, annotations, clustering, selected TFs, and sample counts. |
+| Gene DE preparation | `prepare_bulk_gene_de()` | Collects annotated edgeR pairwise results and builds an explicit comparison manifest. | `bulk_gene_de` object with combined table, comparison information, and QC. |
+| Significant-gene heatmap | `plot_bulk_gene_expression_heatmap()` | Plots the union of significant DE genes using prepared log2 CPM values. | Heatmap result, selected genes, expression matrices, annotations, and gene mapping. |
+| Gene-set enrichment | `run_bulk_gene_enrichment()` | Runs per-contrast GSEA and optional directional ORA with GO or custom gene sets. | Enrichment tables/objects, rankings, universes, QC, settings, and provenance. |
+| Comparison heatmap | `plot_bulk_comparison_heatmap()` | Displays gene logFC or pathway NES across an explicit comparison grid while preserving missing cells. | Heatmap, effect/FDR matrices, annotations, selected features, and comparison manifest. |
+| Condition-response DE | `edgeR_condition_response()` | Tests an overall categorical condition response or numerical-duration trend in one edgeR model. | Results, DGEList, fit/test, design, coefficients, metadata, and settings. |
+| Paired expression plot | `plot_bulk_paired_expression()` | Plots tidy normalized expression with optional within-subject connecting lines and facets. | A ggplot object. |
+| Signaling expression preparation | `prepare_bulk_signaling_expression()` | Produces symbol-indexed log2 CPM and unlogged CPM matrices for ligand/receptor availability checks. | Expression matrices, aligned metadata, and gene mapping. |
+| NicheNet analysis | `run_bulk_nichenet()` | Combines receiver responses with separate sender, receptor, and target evidence using a species-matched NicheNet prior. | Ligand activities, evidence tables, targets, QC, gene sets/backgrounds, mappings, and settings. |
+| NicheNet activity heatmap | `plot_bulk_nichenet_activity()` | Displays corrected AUPR ligand rankings across receiver-condition contexts. | Activity matrix, annotations, and heatmap object. |
+| General expression heatmap | `plot_bulk_expression_heatmap()` | Plots requested genes from prepared log2 CPM by sample or metadata-group mean. | Heatmap object and requested row/column clustering trees. |
+| Ligand-receptor plot preparation | `prepare_bulk_nichenet_lr_plot_data()` | Joins top ligand rankings with sender ligand and receiver receptor evidence. | Long ligand-receptor plotting data. |
+| Ligand-receptor dot plot | `plot_bulk_nichenet_lr_dotplot()` | Shows ligand and receptor expression/effect evidence across senders and conditions. | Plot, plotting data, joined evidence, and pair order. |
+| Ligand-receptor connectivity | `plot_bulk_nichenet_lr_connectivity()` | Displays binary prior connectivity with sender-availability annotations. | Heatmap, connectivity matrix, annotations, evidence, and availability rule. |
 
 ### `read_featurecounts_project(...)`
 
@@ -850,6 +866,161 @@ cap. This overview does not replace the effect sizes, uncertainty, study
 design, replication checks, or complete differential-expression tables
 required for interpretation.
 
+### Advanced bulk transcription-factor workflow
+
+`infer_bulk_tf_activity()` uses prepared expression and a signed, species-
+matched TF-target network to calculate sample-level activities. Differential
+activity is tested separately with `limma_tf_pairwise()`; its
+`DeltaActivity` is a score difference, not a log fold change.
+
+```r
+tf <- infer_bulk_tf_activity(
+  bulk,
+  network = collectri_mouse,
+  group_cols = c("ATM_subtype", "Condition"),
+  min_targets = 10
+)
+
+tf_de <- limma_tf_pairwise(
+  tf,
+  group_col = "Condition",
+  group1 = "ND",
+  group2 = "2W",
+  subset = ATM_subtype == "pATM",
+  covariates = "Batch"
+)
+
+tf_de_table <- tf_de$results
+tf_de_table$ATM_subtype <- "pATM"
+
+tf_heatmap <- plot_bulk_tf_heatmap(
+  tf,
+  de_results = tf_de_table,
+  subtype_order = "pATM",
+  condition_order = c("ND", "2W"),
+  subtype_colors = subtype_colors,
+  condition_colors = condition_colors
+)
+```
+
+Inference requires edgeR and decoupleR; differential testing requires limma;
+the heatmap requires pheatmap. Network organism, identifiers, sign/weight
+semantics, sample groups, covariates, and repeated-measure blocks must be
+verified for the study design.
+
+### Gene differential-expression and enrichment workflow
+
+`prepare_bulk_gene_de()` consolidates named `edgeR_pairwise()` results into a
+comparison-aware object. Its table can drive expression, effect-size, and
+enrichment views without treating missing comparisons as zero.
+
+```r
+gene_de <- prepare_bulk_gene_de(pairwise_results)
+
+gene_heatmap <- plot_bulk_gene_expression_heatmap(
+  bulk,
+  gene_de,
+  subtype_colors = subtype_colors,
+  condition_colors = condition_colors,
+  fdr_cutoff = 0.05
+)
+
+enrichment <- run_bulk_gene_enrichment(
+  gene_de,
+  OrgDb = org.Mm.eg.db,
+  ont = "BP",
+  run_ora = TRUE
+)
+
+effect_heatmap <- plot_bulk_comparison_heatmap(
+  gene_de$table,
+  gene_de$comparison_info,
+  subtype_colors = subtype_colors,
+  condition_colors = condition_colors
+)
+```
+
+`edgeR_condition_response()` is a separate all-sample model for an omnibus
+condition test or a verified numerical-duration trend. Omnibus F statistics
+are unsigned and must not be used as signed enrichment rankings. Enrichment
+requires clusterProfiler and AnnotationDbi plus either an organism annotation
+database or a custom `TERM2GENE` mapping.
+
+### General and paired expression views
+
+`plot_bulk_expression_heatmap()` shows an arbitrary requested gene list from a
+prepared object, either by individual sample or metadata-group mean. It does
+not rerun normalization or select genes by DE significance.
+
+```r
+expression_heatmap <- plot_bulk_expression_heatmap(
+  bulk,
+  genes = c("Il6", "Ccl2", "Tnf"),
+  column_mode = "mean",
+  group_by = c("ATM_subtype", "Condition"),
+  column_order = list(
+    ATM_subtype = c("pATM", "cATM", "sATM"),
+    Condition = c("ND", "2W", "1M", "2M")
+  )
+)
+
+paired_plot <- plot_bulk_paired_expression(
+  tidy_expression,
+  x = "Sorting",
+  y = "Expression",
+  pair_by = "MouseID",
+  facet_by = "Condition"
+)
+```
+
+Pairing lines should be used only when `pair_by` is a verified subject ID and
+each subject has at most one observation per facet and x-axis group.
+
+### Bulk NicheNet signaling workflow
+
+The signaling workflow keeps receiver response, sender availability, receptor
+evidence, and prior connectivity separate. NicheNet activity scores are
+predictive rankings rather than p-values, and the unsigned prior does not by
+itself establish activation or repression.
+
+```r
+sender_signaling <- prepare_bulk_signaling_expression(sender_bulk)
+receiver_signaling <- prepare_bulk_signaling_expression(receiver_bulk)
+
+nichenet_result <- run_bulk_nichenet(
+  sender_bulk,
+  receiver_bulk,
+  sender_de,
+  receiver_de,
+  ligand_target_matrix = ligand_target_matrix,
+  lr_network = lr_network,
+  reference = "ND"
+)
+
+activity_plot <- plot_bulk_nichenet_activity(nichenet_result, response = "up")
+lr_data <- prepare_bulk_nichenet_lr_plot_data(
+  nichenet_result,
+  receiver = "ASC",
+  response = "up"
+)
+lr_dotplot <- plot_bulk_nichenet_lr_dotplot(
+  nichenet_result,
+  receiver = "ASC",
+  response = "up"
+)
+lr_connectivity <- plot_bulk_nichenet_lr_connectivity(
+  nichenet_result,
+  receiver = "ASC",
+  condition = "2W",
+  response = "up"
+)
+```
+
+This workflow requires edgeR, nichenetr, ggplot2, and pheatmap as used by the
+individual functions. Sender/receiver DE contrasts must use the declared
+condition versus reference orientation, and all identifiers must match the
+species-specific NicheNet model.
+
 ### Reusable R palettes
 
 | Palette | Colours | Intended use |
@@ -860,11 +1031,17 @@ required for interpretation.
 | `DE_HEATMAP_COLORS` | Blue, white, and muted red | Default symmetric low-midpoint-high scale in `plot_de_heatmap()`. |
 | `GENE_SET_HEATMAP_COLORS` | Five light-to-dark purple colours | Default expression scale in `plot_gene_set_heatmap()`. |
 | `SIGNED_MANHATTAN_MACARON_COLORS` | 12 muted comparison colours | Default comparison labels in `plot_signed_manhattan()`. |
+| `BULK_PAIRED_EXPRESSION_COLORS` | Six muted macaron colours | Default groups in `plot_bulk_paired_expression()`. |
+| `BULK_SIGNALING_DIVERGING_COLORS` | Blue, white, and muted red anchors | Default signed ligand/receptor effect scale. |
+| `BULK_ACTIVITY_DIVERGING_COLORS` | 100-colour interpolation of the signaling anchors | Default TF, expression, and comparison heatmaps. |
+| `BULK_NICHENET_ACTIVITY_COLORS` | 100-colour white-to-purple gradient | Corrected AUPR ligand-activity heatmaps. |
+| `BULK_NICHENET_SENDER_COLORS` | Named pATM, cATM, and sATM colours | Sender annotations in NicheNet connectivity plots. |
+| `BULK_NICHENET_CONNECTIVITY_COLORS` | Two colours for absent/present links | Binary NicheNet connectivity matrices. |
 
-The palette is stored as an unnamed character vector so a plotting function
-can assign colours consistently after applying the requested group order. Pass
-a named custom vector through `colors` when stable biological labels should
-always use the same colours across studies.
+Unnamed palettes are assigned after applying the requested group order; named
+palettes preserve stable biological labels across plots. Pass a documented
+custom vector through the relevant colour argument when a study requires a
+different mapping.
 
 When another R function is supplied, it will be added to the appropriate
 section in the R pipeline, documented with complete Roxygen comments for inputs

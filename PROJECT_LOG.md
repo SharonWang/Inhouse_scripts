@@ -4,6 +4,54 @@ This file records changes to the reusable in-house single-cell RNA-seq
 preprocessing pipelines. All project files are maintained under
 `D:/Xiaonan/CODEX_projects/Inhouse_scripts/Inhouse_scripts`.
 
+## 2026-10-25
+
+### Audit
+
+- Compared both files in `D:/Xiaonan/CODEX_projects/Inhouse_scripts/updated`
+  against the GitHub-tracked R and Python pipelines before editing.
+- Found no duplicate function definitions in either updated file and no
+  functionally duplicate R additions; the similarly named heatmap functions
+  operate on distinct inputs and answer distinct plotting questions.
+- The updated Python candidate contained no added or modified functions and
+  omitted the repository's newer `cluster_expression_summary()` utility, so
+  the tracked Python pipeline was preserved to avoid an unrequested deletion.
+
+### Added
+
+- Added 16 R bulk RNA-seq functions covering TF activity inference and testing,
+  TF and gene heatmaps, gene-DE collection, enrichment, overall condition
+  response, paired expression, signaling-expression preparation, NicheNet
+  analysis, and ligand-receptor evidence plots.
+- Added reusable paired-expression, diverging activity/signaling, NicheNet
+  activity, sender-annotation, and binary connectivity palettes supplied by
+  the new plotting functions.
+- Added complete Roxygen input and output documentation for every new public R
+  function, including functions that arrived without documentation.
+- Added README function-index entries, workflow examples, dependencies,
+  returned objects, interpretation cautions, and reusable palette entries.
+
+### Changed
+
+- Updated `plot_gene_set_heatmap()` and `plot_de_heatmap()` with the supplied
+  explicit PDF filename handling.
+- Replaced embedded supplied colour vectors with named reusable constants while
+  preserving their original colour values and plotting defaults.
+- Made `plot_bulk_paired_expression()` namespace-safe and added an explicit
+  ggplot2 dependency check so it can be reused after sourcing the pipeline
+  without attaching ggplot2 globally.
+- Made `facet_by = NULL` work for both paired and unpaired expression plots,
+  added complete custom-colour validation, and corrected the README TF heatmap
+  example to supply the required subtype field and matching display orders.
+
+### Verification
+
+- Automated runtime tests were not run, following the user's standing
+  instruction.
+- Statically reviewed function-name uniqueness, candidate-versus-repository
+  differences, Roxygen coverage, README coverage, whitespace, Git scope, and
+  the final staged diff before committing.
+
 ## 2026-09-13
 
 ### Added
