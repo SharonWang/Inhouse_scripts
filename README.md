@@ -400,15 +400,25 @@ and added to this table for future studies.
 
 Source: [`R/scRNAseq_preprocessing.R`](R/scRNAseq_preprocessing.R)
 
-The R pipeline contains reusable bulk/pseudobulk import, validation,
-subsetting, differential-expression, and exploratory visualization utilities.
-The file also retains structured sections for future cell-level preprocessing
-functions supplied in R.
+The R pipeline contains reusable single-cell Monocle trajectory utilities and
+bulk/pseudobulk import, validation, differential-expression, and visualization
+workflows. The Monocle workflow uses monocle3, igraph, Matrix,
+SummarizedExperiment, SingleCellExperiment, ggplot2, ComplexHeatmap, circlize,
+and viridisLite in the functions that require them.
 
 ### Function summary
 
 | Workflow stage | Function | What it does | Main return value(s) |
 |---|---|---|---|
+| Monocle path selection | `get_two_monocle_paths()` | Finds two ordered shortest paths from one root to two principal-graph endpoints. | Node paths, shared nodes, last shared node, and nested-path flag. |
+| Monocle path visualization | `plot_two_monocle_paths()` | Draws the shared trajectory trunk and two directional branches over a cell-type UMAP. | ggplot object. |
+| Monocle pseudotime visualization | `plot_two_monocle_paths_pseudotime()` | Overlays the selected paths on a continuously pseudotime-coloured UMAP. | ggplot object. |
+| Monocle path subsetting | `split_path_by_genotype()` | Retains finite-pseudotime cells and splits the path into configurable WT and cKO labels. | Named list of two cell-data-set subsets. |
+| Monocle path QC | `check_path()` | Summarizes path composition and finite pseudotime coverage by genotype. | Per-genotype pseudotime summary data frame. |
+| Monocle pseudotime modelling | `run_monocle_Q1()` | Fits full and reduced negative-binomial models to test nonlinear pseudotime associations. | Filtered CDS, model tables, complete/significant results, gene filters, formulas, and settings. |
+| Monocle pseudotime heatmap | `make_Q1_pseudotime_heatmap()` | Predicts fitted expression along ordered pseudotime and builds a row-scaled ComplexHeatmap. | Heatmap, fitted matrices, ordered metadata, gene labels, and prediction diagnostics. |
+| Monocle persistence | `save_monocle_compatible()` | Saves a Monocle object while preserving legacy Seurat-associated dimensional-reduction entries separately. | Invisible output-directory path. |
+| Monocle persistence | `load_monocle_compatible()` | Reloads a saved Monocle object and restores its preserved auxiliary entries. | Restored cell-data-set object. |
 | Bulk/pseudobulk count import | `read_featurecounts_project()` | Imports featureCounts counts, aligns metadata, merges optional gene annotation and assignment QC, and optionally creates an edgeR object. | A `featurecounts_project` list containing counts, metadata, genes, QC, summary data, and optional `DGEList`. |
 | Bulk/pseudobulk structural QC | `check_featurecounts_project()` | Audits ordering, identifier uniqueness, invalid count values, integer-likeness, and assignment-rate summaries. | An invisible structured audit containing overall flags, individual checks, and assignment summary. |
 | Bulk/pseudobulk project selection | `subset_featurecounts_project()` | Selects samples with a metadata expression while synchronizing counts, annotations, QC, and summary data. | A new subsetted `featurecounts_project` with an optional rebuilt `DGEList`. |
@@ -438,6 +448,68 @@ functions supplied in R.
 | Ligand-receptor plot preparation | `prepare_bulk_nichenet_lr_plot_data()` | Joins top ligand rankings with sender ligand and receiver receptor evidence. | Long ligand-receptor plotting data. |
 | Ligand-receptor dot plot | `plot_bulk_nichenet_lr_dotplot()` | Shows ligand and receptor expression/effect evidence across senders and conditions. | Plot, plotting data, joined evidence, and pair order. |
 | Ligand-receptor connectivity | `plot_bulk_nichenet_lr_connectivity()` | Displays binary prior connectivity with sender-availability annotations. | Heatmap, connectivity matrix, annotations, evidence, and availability rule. |
+
+### Monocle trajectory workflow
+
+Select two rooted principal-graph routes and visualize them over cell type or
+pseudotime:
+
+```r
+paths <- get_two_monocle_paths(
+  cds,
+  root_node = "Y_1",
+  AT2_1_endpoint = "Y_8",
+  AT1_endpoint = "Y_15"
+)
+
+celltype_plot <- plot_two_monocle_paths(cds, paths)
+pseudotime_plot <- plot_two_monocle_paths_pseudotime(cds, paths)
+path_summary <- check_path(cds)
+genotype_paths <- split_path_by_genotype(cds)
+```
+
+`get_two_monocle_paths()` reports whether the routes diverge or one endpoint is
+nested within the other. Plotting functions validate principal-node names and
+coordinates and do not mutate the input object. The supplied cell-type and
+BuPu pseudotime colours are stored as reusable palettes.
+
+Test genes for nonlinear association with rooted pseudotime, optionally
+adjusting for sample identity as a fixed model term, then visualize fitted
+profiles:
+
+```r
+q1 <- run_monocle_Q1(
+  path_cds = cds,
+  sample_column = "Sample_ID",
+  spline_df = 3,
+  min_cells_expressed = 20
+)
+
+heatmap_result <- make_Q1_pseudotime_heatmap(
+  q1,
+  genes = q1$significant$id,
+  title = "Genes associated with pseudotime"
+)
+ComplexHeatmap::draw(heatmap_result$heatmap)
+```
+
+The model comparison treats cells as observations. A fixed sample term can
+adjust mean sample differences but does not make cells independent biological
+replicates; use the results as trajectory-associated gene evidence with
+appropriate replicate-aware interpretation. The heatmap shows fitted model
+predictions for visualization and is not a separate significance test.
+
+Use the compatible persistence helpers when legacy `gene_loadings` or
+`prop_var_expl` entries prevent direct Monocle serialization:
+
+```r
+save_monocle_compatible(cds, "outputs/monocle_checkpoint", verify = TRUE)
+restored_cds <- load_monocle_compatible("outputs/monocle_checkpoint")
+```
+
+Saving requires a new output location and writes a sibling
+`_seurat_aux.rds` file. With `verify=TRUE`, the saved object is reloaded and
+checked before the function returns.
 
 ### `read_featurecounts_project(...)`
 
@@ -1127,6 +1199,9 @@ species-specific NicheNet model.
 | `BULK_NICHENET_ACTIVITY_COLORS` | 100-colour white-to-purple gradient | Corrected AUPR ligand-activity heatmaps. |
 | `BULK_NICHENET_SENDER_COLORS` | Named pATM, cATM, and sATM colours | Sender annotations in NicheNet connectivity plots. |
 | `BULK_NICHENET_CONNECTIVITY_COLORS` | Two colours for absent/present links | Binary NicheNet connectivity matrices. |
+| `MONOCLE_PATH_CELLTYPE_COLORS` | Named AT2-2, AT2-1, AT1, and Club-cell colours | Cell-type backgrounds in selected Monocle path plots. |
+| `MONOCLE_HEATMAP_CELLTYPE_COLORS` | Named semi-transparent AT2-2, AT2-1, AT1, and Club-cell colours | Cell-type annotation in Monocle pseudotime heatmaps. |
+| `MONOCLE_PSEUDOTIME_COLORS` | 100-colour light-to-dark BuPu gradient | Continuous Monocle pseudotime UMAP scale. |
 
 Unnamed palettes are assigned after applying the requested group order; named
 palettes preserve stable biological labels across plots. Pass a documented

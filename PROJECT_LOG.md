@@ -19,6 +19,13 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added nine R Monocle utilities for rooted two-path selection and plotting,
+  genotype splitting, path QC, nonlinear pseudotime modelling, fitted-profile
+  heatmaps, and compatible save/load checkpoints.
+- Added reusable Monocle cell-type, heatmap-annotation, and continuous BuPu
+  pseudotime palettes while preserving the supplied colour values.
+- Added complete Roxygen parameter, return-value, side-effect, dependency, and
+  scientific-interpretation documentation for the Monocle workflow.
 - Added `quick_umap()` to fit and retain a reusable umap-learn model from
   reference PCA coordinates while storing the reference embedding in AnnData.
 - Added `quick_umap_proj()` to project query observations through a fitted
@@ -41,6 +48,12 @@ preprocessing pipelines. All project files are maintained under
 
 ### Changed
 
+- Made `check_path()` reusable by exposing its previously implicit cell-type
+  and genotype column names as validated parameters, and removed the duplicate
+  continuous-colour scale from the supplied pseudotime plot.
+- Updated the README R function index with the complete Monocle workflow,
+  examples, dependencies, checkpoint behavior, palettes, and cell-level model
+  interpretation cautions.
 - Updated the Python public export list and README function index, dependency
   notes, examples, return contracts, and reference-projection and cell-level
   differential-expression cautions for the three new functions.

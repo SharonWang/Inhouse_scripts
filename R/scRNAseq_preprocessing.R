@@ -217,6 +217,906 @@ BULK_NICHENET_SENDER_COLORS <- c(
 BULK_NICHENET_CONNECTIVITY_COLORS <- c("#F5F5F5", "#8199C1")
 
 
+#' Cell-type colours for Monocle trajectory plots
+#'
+#' Named palettes supplied for the selected AT2-2 to AT2-1/AT1 trajectory
+#' plots. The heatmap palette retains the supplied alpha channel.
+#'
+#' @return Named character vectors mapping cell-type labels to colours.
+MONOCLE_PATH_CELLTYPE_COLORS <- c(
+    "AT2-2" = "#B7C3E0", "AT2-1" = "#D9BE9B",
+    "AT1" = "#78B7A3", "Club cell" = "#E49A72"
+)
+
+
+#' Semi-transparent cell-type colours for Monocle heatmaps
+#'
+#' Named colours supplied for cell-type annotations above fitted pseudotime
+#' heatmaps. The eight-digit hexadecimal values retain their alpha channel.
+#'
+#' @return A named character vector mapping four cell-type labels to colours.
+MONOCLE_HEATMAP_CELLTYPE_COLORS <- c(
+    "AT2-2" = "#FF557180", "AT2-1" = "#0077C980",
+    "AT1" = "#F2982980", "Club cell" = "#67AA6980"
+)
+
+
+#' Sequential purple palette for Monocle pseudotime
+#'
+#' A 100-colour interpolation of the nine-colour ColorBrewer BuPu palette
+#' supplied with [plot_two_monocle_paths_pseudotime()].
+#'
+#' @return A character vector containing 100 hexadecimal colours.
+MONOCLE_PSEUDOTIME_COLORS <- grDevices::colorRampPalette(
+    c(
+        "#F7FCFD", "#E0ECF4", "#BFD3E6", "#9EBCDA", "#8C96C6",
+        "#8C6BB1", "#88419D", "#810F7C", "#4D004B"
+    )
+)(100)
+
+
+# =============================================================================
+# Monocle trajectory selection, modelling, visualization, and persistence
+# =============================================================================
+
+
+#' Select two rooted paths from a Monocle principal graph
+#'
+#' @param cds A Monocle3 `cell_data_set` with a learned UMAP principal graph.
+#' @param root_node Character scalar naming the shared root principal node.
+#' @param AT2_1_endpoint Character scalar naming the AT2-1 endpoint node.
+#' @param AT1_endpoint Character scalar naming the AT1 endpoint node.
+#'
+#' @return A list containing ordered root-to-endpoint node vectors
+#'   `AT2_2_to_AT2_1` and `AT2_2_to_AT1`, their `shared_nodes`, the
+#'   `last_shared_node`, and logical `nested_paths` flag.
+#' @export
+get_two_monocle_paths <- function(cds, root_node, AT2_1_endpoint, AT1_endpoint) {
+    graph <- monocle3::principal_graph(cds)[["UMAP"]]
+    if (is.null(graph)) stop("No UMAP principal graph was found in cds.")
+
+    requested_nodes <- c(root_node, AT2_1_endpoint, AT1_endpoint)
+    if (anyNA(requested_nodes) || any(!nzchar(requested_nodes))) {
+        stop("Root and endpoint names must be non-empty character values.")
+    }
+    if (length(unique(requested_nodes)) != 3L) {
+        stop("Choose three different nodes: one root and two endpoints.")
+    }
+    if (!all(requested_nodes %in% igraph::V(graph)$name)) {
+        stop("One or more selected nodes are absent from the graph.")
+    }
+
+    get_path <- function(endpoint) {
+        vertex_path <- igraph::shortest_paths(
+            graph, from = root_node, to = endpoint, mode = "all",
+            weights = NA, output = "vpath"
+        )$vpath[[1L]]
+        if (length(vertex_path) == 0L) {
+            stop("No connected path from the root to ", endpoint, ".")
+        }
+        igraph::as_ids(vertex_path)
+    }
+
+    path_AT2_1 <- get_path(AT2_1_endpoint)
+    path_AT1 <- get_path(AT1_endpoint)
+    n_shared <- 0L
+    for (i in seq_len(min(length(path_AT2_1), length(path_AT1)))) {
+        if (path_AT2_1[i] != path_AT1[i]) break
+        n_shared <- i
+    }
+    shared_nodes <- path_AT2_1[seq_len(n_shared)]
+    after_shared <- function(path) {
+        if (length(path) > n_shared) path[seq.int(n_shared + 1L, length(path))]
+        else character()
+    }
+    later_overlap <- intersect(
+        after_shared(path_AT2_1),
+        after_shared(path_AT1)
+    )
+    if (length(later_overlap) > 0L) {
+        stop(
+            "Selected shortest paths diverge and later rejoin; choose ",
+            "unambiguous terminal paths for two-branch visualization."
+        )
+    }
+    nested_paths <- AT2_1_endpoint %in% path_AT1 || AT1_endpoint %in% path_AT2_1
+
+    if (nested_paths) {
+        warning(
+            "One endpoint lies on the path to the other. These selections ",
+            "describe a sequential route rather than separate terminal branches."
+        )
+    } else {
+        message("The selected paths diverge after a shared segment.")
+    }
+
+    list(
+        AT2_2_to_AT2_1 = path_AT2_1,
+        AT2_2_to_AT1 = path_AT1,
+        shared_nodes = shared_nodes,
+        last_shared_node = tail(shared_nodes, 1L),
+        nested_paths = nested_paths
+    )
+}
+
+
+#' Plot two selected Monocle paths over cell-type UMAP coordinates
+#'
+#' @param cds A Monocle3 `cell_data_set` with UMAP coordinates and principal
+#'   node coordinates.
+#' @param trajectory_paths List returned by [get_two_monocle_paths()].
+#' @param celltype_column Character scalar naming the cell-type column in
+#'   `colData(cds)`.
+#' @param celltype_colours Named colour vector covering every displayed label.
+#' @param AT2_1_path_colour,AT1_path_colour,shared_colour Colours for the two
+#'   distinct branches and shared trunk.
+#' @param path_linewidth Positive numeric trajectory-line width.
+#' @param arrow_position Numeric scalar strictly between zero and one giving
+#'   the arrow endpoint as a fraction of branch length.
+#' @param arrow_span Numeric scalar in `(0, 1]` giving arrow length as a
+#'   fraction of branch length.
+#' @param arrow_head_mm Positive numeric arrow-head length in millimetres.
+#' @param arrow_angle Numeric arrow-head angle in degrees.
+#' @param cell_size Positive numeric cell-point size passed to
+#'   [monocle3::plot_cells()].
+#'
+#' @return A `ggplot` object showing cells, shared trunk, distinct branches,
+#'   and directional arrows. The input object is not modified.
+#' @export
+plot_two_monocle_paths <- function(
+    cds,
+    trajectory_paths,
+    celltype_column = "RNA_Anno_AAC",
+    celltype_colours = MONOCLE_PATH_CELLTYPE_COLORS,
+    AT2_1_path_colour = "#C98961",
+    AT1_path_colour = "#43947A",
+    shared_colour = "black",
+    path_linewidth = 1.2,
+    arrow_position = 0.70,
+    arrow_span = 0.12,
+    arrow_head_mm = 3.5,
+    arrow_angle = 25,
+    cell_size = 0.6
+) {
+    metadata <- as.data.frame(SummarizedExperiment::colData(cds))
+    if (!celltype_column %in% colnames(metadata)) {
+        stop("Cell-type column not found: ", celltype_column)
+    }
+    labels <- unique(as.character(metadata[[celltype_column]]))
+    if (anyNA(labels) || !all(labels %in% names(celltype_colours))) {
+        stop("celltype_colours must name every non-missing displayed label.")
+    }
+
+    path_AT2_1 <- as.character(trajectory_paths$AT2_2_to_AT2_1)
+    path_AT1 <- as.character(trajectory_paths$AT2_2_to_AT1)
+    if (length(path_AT2_1) < 2L || length(path_AT1) < 2L) {
+        stop("Each trajectory must contain at least two nodes.")
+    }
+    if (path_AT2_1[1L] != path_AT1[1L]) {
+        stop("Both trajectories must start at the same root node.")
+    }
+    if (length(arrow_position) != 1L || !is.finite(arrow_position) ||
+        arrow_position <= 0 || arrow_position >= 1) {
+        stop("arrow_position must be between 0 and 1.")
+    }
+    if (length(arrow_span) != 1L || !is.finite(arrow_span) ||
+        arrow_span <= 0 || arrow_span > 1) {
+        stop("arrow_span must be greater than 0 and at most 1.")
+    }
+    positive_values <- c(path_linewidth, arrow_head_mm, cell_size)
+    if (any(!is.finite(positive_values)) || any(positive_values <= 0)) {
+        stop("Line width, arrow-head size, and cell size must be positive.")
+    }
+
+    node_coordinates <- t(cds@principal_graph_aux[["UMAP"]]$dp_mst)
+    requested_nodes <- unique(c(path_AT2_1, path_AT1))
+    if (is.null(rownames(node_coordinates)) || ncol(node_coordinates) < 2L ||
+        !all(requested_nodes %in% rownames(node_coordinates))) {
+        stop("Path nodes do not match two-dimensional principal-node coordinates.")
+    }
+    if (any(!is.finite(node_coordinates[requested_nodes, 1:2, drop = FALSE]))) {
+        stop("Principal-node coordinates contain non-finite values.")
+    }
+
+    n_shared <- 0L
+    for (i in seq_len(min(length(path_AT2_1), length(path_AT1)))) {
+        if (path_AT2_1[i] != path_AT1[i]) break
+        n_shared <- i
+    }
+    shared_path <- path_AT2_1[seq_len(n_shared)]
+    branch_AT2_1 <- path_AT2_1[seq.int(n_shared, length(path_AT2_1))]
+    branch_AT1 <- path_AT1[seq.int(n_shared, length(path_AT1))]
+    if (length(branch_AT2_1) < 2L || length(branch_AT1) < 2L) {
+        warning("One path ends within the shared trunk; its arrow is omitted.")
+    }
+
+    make_path_data <- function(path) {
+        coordinates <- node_coordinates[path, 1:2, drop = FALSE]
+        data.frame(x = coordinates[, 1L], y = coordinates[, 2L])
+    }
+    make_arrow_data <- function(path) {
+        empty <- data.frame(x = numeric(), y = numeric())
+        if (length(path) < 2L) return(empty)
+        coordinates <- node_coordinates[path, 1:2, drop = FALSE]
+        segment_lengths <- sqrt(rowSums(
+            (coordinates[-1L, , drop = FALSE] -
+                coordinates[-nrow(coordinates), , drop = FALSE])^2
+        ))
+        distances <- c(0, cumsum(segment_lengths))
+        keep <- !duplicated(distances)
+        distances <- distances[keep]
+        coordinates <- coordinates[keep, , drop = FALSE]
+        if (length(distances) < 2L) return(empty)
+        arrow_end <- arrow_position * tail(distances, 1L)
+        arrow_start <- max(0, arrow_end - arrow_span * tail(distances, 1L))
+        selected <- sort(unique(c(
+            arrow_start,
+            distances[distances > arrow_start & distances < arrow_end],
+            arrow_end
+        )))
+        data.frame(
+            x = stats::approx(distances, coordinates[, 1L], xout = selected)$y,
+            y = stats::approx(distances, coordinates[, 2L], xout = selected)$y
+        )
+    }
+    add_path <- function(plot, path, colour, arrow = FALSE) {
+        path_data <- if (arrow) make_arrow_data(path) else make_path_data(path)
+        if (nrow(path_data) < 2L) return(plot)
+        arrow_spec <- if (arrow) grid::arrow(
+            angle = arrow_angle, length = grid::unit(arrow_head_mm, "mm"),
+            ends = "last", type = "closed"
+        ) else NULL
+        plot + ggplot2::geom_path(
+            data = path_data,
+            mapping = ggplot2::aes(x = x, y = y, group = 1),
+            inherit.aes = FALSE, colour = colour, linewidth = path_linewidth,
+            lineend = if (arrow) "butt" else "round", linejoin = "round",
+            arrow = arrow_spec, arrow.fill = colour
+        )
+    }
+
+    p <- monocle3::plot_cells(
+        cds, reduction_method = "UMAP", color_cells_by = celltype_column,
+        show_trajectory_graph = FALSE, label_cell_groups = FALSE,
+        label_branch_points = FALSE, label_leaves = FALSE,
+        cell_size = cell_size
+    ) + ggplot2::scale_colour_manual(values = celltype_colours)
+    p <- add_path(p, shared_path, shared_colour)
+    p <- add_path(p, branch_AT2_1, AT2_1_path_colour)
+    p <- add_path(p, branch_AT1, AT1_path_colour)
+    p <- add_path(p, branch_AT2_1, AT2_1_path_colour, arrow = TRUE)
+    p <- add_path(p, branch_AT1, AT1_path_colour, arrow = TRUE)
+    p + ggplot2::labs(title = "Selected AT2-2 trajectories")
+}
+
+
+#' Plot selected Monocle paths over a pseudotime-coloured UMAP
+#'
+#' @param cds A rooted Monocle3 `cell_data_set` with finite pseudotime values.
+#' @param trajectory_paths List returned by [get_two_monocle_paths()].
+#' @param arrow_position,arrow_span,arrow_head_mm,cell_size Plot controls passed
+#'   to [plot_two_monocle_paths()].
+#' @param celltype_column Character scalar naming the cell-type metadata used
+#'   while constructing the reusable path layers.
+#' @param celltype_colours Named colour vector covering that metadata column.
+#' @param pseudotime_colours Colour vector for the continuous pseudotime scale.
+#' @param title Character scalar plot title.
+#'
+#' @return A `ggplot` object with pseudotime-coloured cells and the selected
+#'   path and arrow layers. The input object is not modified.
+#' @export
+plot_two_monocle_paths_pseudotime <- function(
+    cds,
+    trajectory_paths,
+    arrow_position = 0.80,
+    arrow_span = 0.2,
+    arrow_head_mm = 3,
+    cell_size = 0.6,
+    celltype_column = "RNA_Anno_AAC",
+    celltype_colours = MONOCLE_PATH_CELLTYPE_COLORS,
+    pseudotime_colours = MONOCLE_PSEUDOTIME_COLORS,
+    title = "Selected AT2-2 trajectories"
+) {
+    pseudotime_values <- monocle3::pseudotime(cds)
+    if (!any(is.finite(pseudotime_values))) {
+        stop("No finite pseudotime values; run order_cells() with a root first.")
+    }
+    trajectory_plot <- plot_two_monocle_paths(
+        cds = cds, trajectory_paths = trajectory_paths,
+        arrow_position = arrow_position, arrow_span = arrow_span,
+        arrow_head_mm = arrow_head_mm, cell_size = cell_size,
+        celltype_column = celltype_column,
+        celltype_colours = celltype_colours
+    )
+    trajectory_layers <- Filter(
+        function(layer) inherits(layer$geom, "GeomPath") ||
+            inherits(layer$geom, "GeomSegment") ||
+            inherits(layer$geom, "GeomCurve") || inherits(layer$geom, "GeomLine"),
+        trajectory_plot$layers
+    )
+    if (length(trajectory_layers) == 0L) {
+        stop("No trajectory lines or arrows found in the original plot.")
+    }
+    p <- monocle3::plot_cells(
+        cds, reduction_method = "UMAP", color_cells_by = "pseudotime",
+        show_trajectory_graph = FALSE, label_cell_groups = FALSE,
+        label_branch_points = FALSE, label_leaves = FALSE, label_roots = FALSE,
+        cell_size = cell_size
+    )
+    for (layer in trajectory_layers) p <- p + layer
+    p + ggplot2::scale_colour_gradientn(
+        colours = pseudotime_colours, na.value = "grey80", name = "Pseudotime"
+    ) + ggplot2::labs(title = title, x = "UMAP 1", y = "UMAP 2") +
+        ggplot2::theme(legend.position = "right")
+}
+
+
+#' Split a finite-pseudotime Monocle path by genotype
+#'
+#' @param path_cds A Monocle3 `cell_data_set` with a `Pseudotime` column.
+#' @param genotype_column Character scalar naming the genotype metadata column.
+#' @param wt_label,cko_label Character labels identifying WT and cKO cells.
+#'
+#' @return A named list with `WT` and `cKO` cell-data-set subsets. Cells with
+#'   non-finite pseudotime or missing genotype are excluded; the input is not
+#'   modified.
+#' @export
+split_path_by_genotype <- function(
+    path_cds,
+    genotype_column = "Genotype",
+    wt_label = "WT",
+    cko_label = "cKO"
+) {
+    metadata <- as.data.frame(SummarizedExperiment::colData(path_cds))
+    required <- c("Pseudotime", genotype_column)
+    if (!all(required %in% colnames(metadata))) {
+        stop("Missing required metadata: ", paste(setdiff(required, colnames(metadata)), collapse = ", "))
+    }
+    if (identical(wt_label, cko_label)) stop("wt_label and cko_label must differ.")
+    keep <- is.finite(metadata$Pseudotime) & !is.na(metadata[[genotype_column]])
+    path_cds <- path_cds[, keep]
+    genotype <- as.character(SummarizedExperiment::colData(path_cds)[[genotype_column]])
+    unknown <- setdiff(unique(genotype), c(wt_label, cko_label))
+    if (length(unknown) > 0L) {
+        warning("Excluding other genotype labels: ", paste(unknown, collapse = ", "))
+    }
+    list(
+        WT = path_cds[, genotype == wt_label],
+        cKO = path_cds[, genotype == cko_label]
+    )
+}
+
+
+#' Check path composition and pseudotime coverage
+#'
+#' @param path_cds A Monocle3 `cell_data_set` containing path cells.
+#' @param celltype_column Character scalar naming the cell-type metadata column.
+#' @param genotype_column Character scalar naming the genotype metadata column.
+#' @param pseudotime_column Character scalar naming numeric pseudotime metadata.
+#' @param verbose Logical scalar; whether to print the cell-type-by-genotype
+#'   table.
+#'
+#' @return A data frame with genotype, finite-pseudotime cell count, and
+#'   minimum, median, and maximum pseudotime. The input is not modified.
+#' @export
+check_path <- function(
+    path_cds,
+    celltype_column = "RNA_Anno_AAC",
+    genotype_column = "Genotype",
+    pseudotime_column = "Pseudotime",
+    verbose = TRUE
+) {
+    metadata <- as.data.frame(SummarizedExperiment::colData(path_cds))
+    required <- c(celltype_column, genotype_column, pseudotime_column)
+    if (!all(required %in% colnames(metadata))) {
+        stop("Missing required metadata: ", paste(setdiff(required, colnames(metadata)), collapse = ", "))
+    }
+    if (!is.numeric(metadata[[pseudotime_column]])) stop("Pseudotime must be numeric.")
+    if (isTRUE(verbose)) {
+        print(table(
+            CellType = metadata[[celltype_column]],
+            Genotype = metadata[[genotype_column]], useNA = "ifany"
+        ))
+    }
+    finite <- is.finite(metadata[[pseudotime_column]]) & !is.na(metadata[[genotype_column]])
+    use <- metadata[finite, , drop = FALSE]
+    if (nrow(use) == 0L) stop("No cells have finite pseudotime and genotype.")
+    groups <- split(use[[pseudotime_column]], as.character(use[[genotype_column]]))
+    do.call(rbind, lapply(names(groups), function(group) {
+        values <- groups[[group]]
+        data.frame(
+            Genotype = group, n_cells = length(values),
+            pseudotime_min = min(values), pseudotime_median = stats::median(values),
+            pseudotime_max = max(values), row.names = NULL
+        )
+    }))
+}
+
+
+#' Save a Monocle object while preserving Seurat-associated auxiliary entries
+#'
+#' @param cds_object A Monocle3 `cell_data_set` to save.
+#' @param directory_path Character scalar naming a new output directory.
+#' @param verify Logical scalar; whether to reload and compare identifiers,
+#'   UMAP coordinates, principal graph, and cell metadata before returning.
+#'
+#' @return Invisibly returns `directory_path`. The function writes the Monocle
+#'   directory and a sibling `_seurat_aux.rds` file containing legacy
+#'   `gene_loadings` and `prop_var_expl` entries when present.
+#' @export
+save_monocle_compatible <- function(cds_object, directory_path, verify = TRUE) {
+    if (!is.character(directory_path) || length(directory_path) != 1L ||
+        is.na(directory_path) || !nzchar(directory_path)) {
+        stop("directory_path must be a non-empty character scalar.")
+    }
+    auxiliary_file <- paste0(directory_path, "_seurat_aux.rds")
+    if (dir.exists(directory_path) || file.exists(auxiliary_file)) {
+        stop("Output already exists; use a new location: ", directory_path)
+    }
+    parent_directory <- dirname(directory_path)
+    dir.create(parent_directory, recursive = TRUE, showWarnings = FALSE)
+    staging_directory <- tempfile(
+        pattern = paste0(".", basename(directory_path), "_staging_"),
+        tmpdir = parent_directory
+    )
+    staging_auxiliary <- paste0(staging_directory, "_seurat_aux.rds")
+    on.exit({
+        if (dir.exists(staging_directory)) {
+            unlink(staging_directory, recursive = TRUE, force = TRUE)
+        }
+        if (file.exists(staging_auxiliary)) unlink(staging_auxiliary, force = TRUE)
+    }, add = TRUE)
+    cds_save <- cds_object
+    legacy_names <- intersect(
+        c("gene_loadings", "prop_var_expl"), names(cds_save@reduce_dim_aux)
+    )
+    legacy_aux <- as.list(cds_save@reduce_dim_aux[legacy_names])
+    for (entry in legacy_names) cds_save@reduce_dim_aux[[entry]] <- NULL
+
+    monocle3::save_monocle_objects(
+        cds = cds_save, directory_path = staging_directory,
+        archive_control = list(archive_type = "none"),
+        comment = basename(directory_path)
+    )
+    saveRDS(legacy_aux, staging_auxiliary)
+
+    if (isTRUE(verify)) {
+        restored <- load_monocle_compatible(staging_directory)
+        checks <- c(
+            identical(rownames(restored), rownames(cds_object)),
+            identical(colnames(restored), colnames(cds_object)),
+            isTRUE(all.equal(
+                SingleCellExperiment::reducedDim(restored, "UMAP"),
+                SingleCellExperiment::reducedDim(cds_object, "UMAP")
+            )),
+            isTRUE(all.equal(restored@principal_graph, cds_object@principal_graph)),
+            isTRUE(all.equal(
+                SummarizedExperiment::colData(restored),
+                SummarizedExperiment::colData(cds_object)
+            )),
+            all(vapply(legacy_names, function(entry) {
+                isTRUE(all.equal(
+                    restored@reduce_dim_aux[[entry]],
+                    cds_object@reduce_dim_aux[[entry]]
+                ))
+            }, logical(1)))
+        )
+        rm(restored)
+        gc(verbose = FALSE)
+        if (!all(checks)) stop("Saved Monocle object failed verification.")
+    }
+
+    if (!file.rename(staging_auxiliary, auxiliary_file)) {
+        stop("Could not move the auxiliary file into its final location.")
+    }
+    if (!file.rename(staging_directory, directory_path)) {
+        file.rename(auxiliary_file, staging_auxiliary)
+        stop("Could not move the Monocle directory into its final location.")
+    }
+    message(if (isTRUE(verify)) "Saved and checked: " else "Saved: ", directory_path)
+    invisible(directory_path)
+}
+
+
+#' Load a Monocle object and restore saved auxiliary entries
+#'
+#' @param directory_path Character scalar naming a directory previously written
+#'   by [save_monocle_compatible()].
+#'
+#' @return The restored Monocle3 `cell_data_set`, with saved legacy
+#'   `reduce_dim_aux` entries reattached when the sibling auxiliary file exists.
+#' @export
+load_monocle_compatible <- function(directory_path) {
+    if (!dir.exists(directory_path)) stop("Directory not found: ", directory_path)
+    cds_restored <- monocle3::load_monocle_objects(directory_path = directory_path)
+    auxiliary_file <- paste0(directory_path, "_seurat_aux.rds")
+    if (file.exists(auxiliary_file)) {
+        auxiliary_data <- readRDS(auxiliary_file)
+        if (!is.list(auxiliary_data)) stop("Auxiliary file must contain a named list.")
+        for (entry_name in names(auxiliary_data)) {
+            cds_restored@reduce_dim_aux[[entry_name]] <- auxiliary_data[[entry_name]]
+        }
+    }
+    cds_restored
+}
+
+
+#' Test genes for nonlinear association with Monocle pseudotime
+#'
+#' @param path_cds A Monocle3 `cell_data_set` with raw `counts` and numeric
+#'   `Pseudotime` in `colData`.
+#' @param path_label Character scalar recorded in messages and result rows.
+#' @param sample_column `NULL` or a character scalar naming a sample column to
+#'   include as a fixed adjustment term when more than one level is observed.
+#' @param spline_df Integer degrees of freedom for the natural-spline basis.
+#' @param min_cells_expressed Integer minimum detected-cell count per gene.
+#' @param min_pct_expressed Numeric minimum detected-cell fraction in `[0, 1]`.
+#' @param fdr_cutoff Numeric Benjamini-Hochberg threshold in `[0, 1]`.
+#' @param cores Positive integer number of cores passed to Monocle model fits.
+#'
+#' @return A list containing the filtered `cds`, complete `results`,
+#'   `significant` results, `gene_filter`, full and reduced model tables,
+#'   formula strings, and a `settings` provenance list.
+#'
+#' @details The likelihood-ratio comparison tests whether the natural-spline
+#'   pseudotime terms improve a negative-binomial model beyond the optional
+#'   sample adjustment. Cells are observations; repeated biological samples
+#'   require careful interpretation because a fixed sample term does not by
+#'   itself make cells independent biological replicates.
+#' @export
+run_monocle_Q1 <- function(
+    path_cds,
+    path_label = "Pseudotime trajectory",
+    sample_column = NULL,
+    spline_df = 3,
+    min_cells_expressed = 20,
+    min_pct_expressed = 0.05,
+    fdr_cutoff = 0.05,
+    cores = 1
+) {
+    integer_values <- c(
+        spline_df = spline_df, min_cells_expressed = min_cells_expressed,
+        cores = cores
+    )
+    if (any(!is.finite(integer_values)) || any(integer_values != as.integer(integer_values)) ||
+        any(integer_values <= 0)) stop("spline_df, min_cells_expressed, and cores must be positive integers.")
+    if (!is.finite(min_pct_expressed) || min_pct_expressed < 0 || min_pct_expressed > 1 ||
+        !is.finite(fdr_cutoff) || fdr_cutoff < 0 || fdr_cutoff > 1) {
+        stop("min_pct_expressed and fdr_cutoff must lie between 0 and 1.")
+    }
+
+    metadata <- as.data.frame(SummarizedExperiment::colData(path_cds))
+    if (!"Pseudotime" %in% colnames(metadata)) {
+        stop("Missing Pseudotime column; define rooted pseudotime first.")
+    }
+    if (!is.numeric(metadata$Pseudotime)) stop("Pseudotime must be numeric.")
+    if (!"counts" %in% SummarizedExperiment::assayNames(path_cds)) {
+        stop("path_cds must contain a counts assay.")
+    }
+    keep_cells <- is.finite(metadata$Pseudotime)
+    cds_use <- path_cds[, keep_cells]
+    if (ncol(cds_use) < 30L) stop("Fewer than 30 cells have finite pseudotime.")
+    metadata <- as.data.frame(SummarizedExperiment::colData(cds_use))
+    if (length(unique(metadata$Pseudotime)) <= spline_df) {
+        stop("Insufficient distinct pseudotime values for spline_df.")
+    }
+
+    cds_use <- monocle3::estimate_size_factors(cds_use)
+    counts <- SummarizedExperiment::assay(cds_use, "counts")
+    n_expressed <- as.numeric(Matrix::rowSums(counts > 0))
+    gene_filter <- data.frame(
+        id = rownames(cds_use), n_cells_expressed = n_expressed,
+        pct_expressed = n_expressed / ncol(cds_use), stringsAsFactors = FALSE
+    )
+    gene_filter$tested <- gene_filter$n_cells_expressed >= min_cells_expressed &
+        gene_filter$pct_expressed >= min_pct_expressed
+    tested_genes <- gene_filter$id[gene_filter$tested]
+    if (length(tested_genes) == 0L) stop("No genes passed the expression filters.")
+    cds_use <- monocle3::detect_genes(cds_use[tested_genes, ], min_expr = 0)
+    if (!"gene_short_name" %in% colnames(SummarizedExperiment::rowData(cds_use))) {
+        SummarizedExperiment::rowData(cds_use)$gene_short_name <- rownames(cds_use)
+    }
+
+    spline_basis <- splines::ns(
+        metadata$Pseudotime, df = spline_df, intercept = FALSE
+    )
+    spline_columns <- paste0("PT_spline_", seq_len(ncol(spline_basis)))
+    for (j in seq_along(spline_columns)) {
+        SummarizedExperiment::colData(cds_use)[[spline_columns[j]]] <- spline_basis[, j]
+    }
+    adjustment_terms <- character()
+    if (!is.null(sample_column)) {
+        if (!is.character(sample_column) || length(sample_column) != 1L ||
+            !sample_column %in% colnames(metadata)) {
+            stop("sample_column must name a column in colData(path_cds).")
+        }
+        sample_values <- metadata[[sample_column]]
+        if (anyNA(sample_values)) stop("Sample identifiers contain missing values.")
+        sample_values <- droplevels(factor(sample_values))
+        if (nlevels(sample_values) > 1L) {
+            SummarizedExperiment::colData(cds_use)$Sample_ID <- sample_values
+            adjustment_terms <- "Sample_ID"
+        }
+    }
+    full_formula <- paste("~", paste(c(adjustment_terms, spline_columns), collapse = " + "))
+    reduced_formula <- if (length(adjustment_terms)) "~ Sample_ID" else "~ 1"
+    model_metadata <- as.data.frame(SummarizedExperiment::colData(cds_use))
+    design <- stats::model.matrix(stats::as.formula(full_formula), data = model_metadata)
+    if (qr(design)$rank < ncol(design)) {
+        stop("The model is rank deficient; check pseudotime coverage and sample confounding.")
+    }
+    if (nrow(design) <= ncol(design)) stop("Insufficient cells for the specified model.")
+
+    message(path_label, ": ", ncol(cds_use), " cells; ", nrow(cds_use), " genes")
+    message("Full model: ", full_formula)
+    message("Reduced model: ", reduced_formula)
+    full_models <- monocle3::fit_models(
+        cds_use, model_formula_str = full_formula,
+        expression_family = "negbinomial", cores = cores, verbose = TRUE
+    )
+    reduced_models <- monocle3::fit_models(
+        cds_use, model_formula_str = reduced_formula,
+        expression_family = "negbinomial", cores = cores, verbose = TRUE
+    )
+    results <- monocle3::compare_models(full_models, reduced_models)
+    if (!"id" %in% colnames(results)) {
+        if ("gene_id" %in% colnames(results)) {
+            results$id <- results$gene_id
+        } else stop("No gene identifier column returned by compare_models().")
+    }
+    if (!"p_value" %in% colnames(results)) {
+        stop("compare_models() did not return a p_value column.")
+    }
+    results$id <- as.character(results$id)
+    if (!all(results$id %in% gene_filter$id)) {
+        stop("Result gene identifiers do not match input genes.")
+    }
+    results$path <- path_label
+    results$q_value <- stats::p.adjust(results$p_value, method = "BH")
+    results$significant <- is.finite(results$q_value) & results$q_value < fdr_cutoff
+    results <- merge(
+        results, gene_filter[, c("id", "pct_expressed")], by = "id",
+        all.x = TRUE, sort = FALSE
+    )
+    results <- results[order(results$q_value, results$p_value), , drop = FALSE]
+    rownames(results) <- NULL
+    message("Valid tests: ", sum(is.finite(results$p_value)), " / ", nrow(results))
+    message("Significant pseudotime-associated genes: ", sum(results$significant, na.rm = TRUE))
+
+    list(
+        cds = cds_use, results = results,
+        significant = results[results$significant %in% TRUE, , drop = FALSE],
+        gene_filter = gene_filter, full_models = full_models,
+        reduced_models = reduced_models, full_formula = full_formula,
+        reduced_formula = reduced_formula,
+        settings = list(
+            path_label = path_label, sample_column = sample_column,
+            spline_df = spline_df, min_cells_expressed = min_cells_expressed,
+            min_pct_expressed = min_pct_expressed, fdr_cutoff = fdr_cutoff,
+            expression_family = "negbinomial",
+            spline_attributes = attributes(spline_basis)
+        )
+    )
+}
+
+
+#' Build a fitted-expression heatmap along Monocle pseudotime
+#'
+#' @param Q1_result List returned by [run_monocle_Q1()].
+#' @param genes Character vector of fitted gene identifiers to display.
+#' @param title Character scalar used as the heatmap column title.
+#' @param celltype_column Character scalar naming cell type in `colData`.
+#' @param celltype_colours Named colour vector covering displayed cell types.
+#' @param row_order `NULL` or an ordered character vector of gene identifiers.
+#' @param label_genes `NULL` or gene identifiers/symbols to label explicitly.
+#' @param highlight_genes Gene identifiers/symbols labelled in red italics.
+#' @param z_limit Positive numeric symmetric row-z-score colour limit.
+#' @param pseudotime_range `NULL` or a strictly increasing numeric length-two
+#'   range shared across comparable heatmaps.
+#' @param sample_level `NULL` or the fitted `Sample_ID` level held fixed for
+#'   visualization; the most frequent sample is used when omitted.
+#' @param gene_fontsize Positive numeric annotation-label font size.
+#' @param heatmap_height_cm,heatmap_width_cm Positive numeric heatmap size in
+#'   centimetres.
+#'
+#' @return A list containing the `heatmap`, row-scaled `z_matrix`, unscaled
+#'   `predicted_expression`, ordered `cell_metadata`, `gene_order`, displayed
+#'   `gene_symbols`, `failed_predictions`, `constant_genes`, and the
+#'   `reference_sample` used for adjusted prediction.
+#'
+#' @details Predictions are visualization summaries from the fitted full
+#'   models, ordered by observed pseudotime. They are not independent tests or
+#'   substitutes for the likelihood-ratio results in `Q1_result$results`.
+#' @export
+make_Q1_pseudotime_heatmap <- function(
+    Q1_result,
+    genes,
+    title,
+    celltype_column = "RNA_Anno_AAC",
+    celltype_colours = MONOCLE_HEATMAP_CELLTYPE_COLORS,
+    row_order = NULL,
+    label_genes = NULL,
+    highlight_genes = c("Cd44", "Itgb1", "Itga9", "Sdc1", "Itgav", "Plaur", "Itga3"),
+    z_limit = 2,
+    pseudotime_range = NULL,
+    sample_level = NULL,
+    gene_fontsize = 10,
+    heatmap_height_cm = 9,
+    heatmap_width_cm = 11
+) {
+    required_elements <- c("cds", "full_models")
+    if (!is.list(Q1_result) || !all(required_elements %in% names(Q1_result))) {
+        stop("Q1_result must contain cds and full_models from run_monocle_Q1().")
+    }
+    positive_values <- c(z_limit, gene_fontsize, heatmap_height_cm, heatmap_width_cm)
+    if (any(!is.finite(positive_values)) || any(positive_values <= 0)) {
+        stop("z_limit, font size, and heatmap dimensions must be positive.")
+    }
+    genes <- unique(as.character(genes))
+    genes <- genes[!is.na(genes) & nzchar(genes)]
+    if (length(genes) == 0L) stop("genes must contain at least one identifier.")
+
+    cds_use <- Q1_result$cds
+    metadata <- as.data.frame(SummarizedExperiment::colData(cds_use))
+    required_columns <- c("Pseudotime", celltype_column)
+    if (!all(required_columns %in% colnames(metadata))) {
+        stop("Missing Pseudotime or cell-type metadata.")
+    }
+    metadata <- metadata[colnames(cds_use), , drop = FALSE]
+    metadata <- metadata[order(metadata$Pseudotime, rownames(metadata)), , drop = FALSE]
+    if (any(!is.finite(metadata$Pseudotime))) stop("Pseudotime contains non-finite values.")
+    cell_labels <- as.character(metadata[[celltype_column]])
+    if (anyNA(cell_labels)) stop("Cell-type annotations contain missing values.")
+    unknown_labels <- setdiff(unique(cell_labels), names(celltype_colours))
+    if (length(unknown_labels)) {
+        stop("Missing colors for: ", paste(unknown_labels, collapse = ", "))
+    }
+
+    models <- Q1_result$full_models
+    if (!"model" %in% colnames(models)) stop("Q1_result does not contain fitted models.")
+    if ("gene_id" %in% colnames(models)) {
+        model_ids <- as.character(models$gene_id)
+    } else if ("id" %in% colnames(models)) {
+        model_ids <- as.character(models$id)
+    } else stop("No id or gene_id column in full_models.")
+    missing_genes <- setdiff(genes, model_ids)
+    if (length(missing_genes)) message("Genes without models: ", paste(missing_genes, collapse = ", "))
+    genes <- genes[genes %in% model_ids]
+    if (length(genes) == 0L) stop("None of the requested genes has a fitted model.")
+
+    prediction_metadata <- metadata
+    prediction_metadata$Size_Factor <- 1
+    reference_sample <- NULL
+    if ("Sample_ID" %in% colnames(prediction_metadata)) {
+        sample_levels <- levels(factor(metadata$Sample_ID))
+        if (is.null(sample_level)) {
+            sample_level <- names(sort(table(metadata$Sample_ID), decreasing = TRUE))[1L]
+        }
+        if (!sample_level %in% sample_levels) stop("sample_level is absent from the fitted dataset.")
+        prediction_metadata$Sample_ID <- factor(
+            rep(sample_level, nrow(prediction_metadata)), levels = sample_levels
+        )
+        reference_sample <- sample_level
+        message("Predictions hold Sample_ID fixed at: ", sample_level)
+    }
+
+    predicted_expression <- matrix(
+        NA_real_, nrow = length(genes), ncol = nrow(metadata),
+        dimnames = list(genes, rownames(metadata))
+    )
+    prediction_errors <- rep(NA_character_, length(genes))
+    for (i in seq_along(genes)) {
+        gene_model <- models$model[[match(genes[i], model_ids)]]
+        predicted_expression[i, ] <- tryCatch({
+            values <- as.numeric(stats::predict(
+                gene_model, newdata = prediction_metadata, type = "response"
+            ))
+            if (length(values) != nrow(metadata) || any(!is.finite(values)) || any(values < 0)) {
+                stop("Invalid predicted expression values.")
+            }
+            values
+        }, error = function(e) {
+            prediction_errors[i] <<- conditionMessage(e)
+            rep(NA_real_, nrow(metadata))
+        })
+    }
+    failed <- !is.na(prediction_errors)
+    failed_predictions <- data.frame(
+        id = genes[failed], error = prediction_errors[failed], stringsAsFactors = FALSE
+    )
+    if (any(failed)) message("Dropping ", sum(failed), " genes with failed predictions.")
+    predicted_expression <- predicted_expression[!failed, , drop = FALSE]
+    if (nrow(predicted_expression) == 0L) stop("All predictions failed.")
+
+    log_expression <- log1p(predicted_expression)
+    row_sd <- apply(log_expression, 1L, stats::sd)
+    variable_rows <- is.finite(row_sd) & row_sd > 1e-8
+    constant_genes <- rownames(log_expression)[!variable_rows]
+    log_expression <- log_expression[variable_rows, , drop = FALSE]
+    predicted_expression <- predicted_expression[variable_rows, , drop = FALSE]
+    if (nrow(log_expression) == 0L) stop("No variable fitted profiles remain.")
+    z_matrix <- sweep(log_expression, 1L, rowMeans(log_expression), "-")
+    z_matrix <- sweep(z_matrix, 1L, row_sd[variable_rows], "/")
+
+    if (is.null(row_order)) {
+        peak_positions <- max.col(z_matrix, ties.method = "first")
+        gene_order <- rownames(z_matrix)[order(peak_positions, rownames(z_matrix))]
+    } else {
+        gene_order <- as.character(row_order)
+        if (anyDuplicated(gene_order)) stop("row_order contains duplicated gene IDs.")
+        unavailable <- setdiff(gene_order, rownames(z_matrix))
+        if (length(unavailable)) message("Unavailable row-order genes: ", paste(unavailable, collapse = ", "))
+        gene_order <- gene_order[gene_order %in% rownames(z_matrix)]
+    }
+    if (length(gene_order) == 0L) stop("No genes remain in the requested row order.")
+    z_matrix <- z_matrix[gene_order, , drop = FALSE]
+    predicted_expression <- predicted_expression[gene_order, , drop = FALSE]
+
+    feature_metadata <- as.data.frame(SummarizedExperiment::rowData(cds_use))
+    gene_symbols <- gene_order
+    if ("gene_short_name" %in% colnames(feature_metadata)) {
+        symbols <- as.character(feature_metadata[gene_order, "gene_short_name"])
+        valid <- !is.na(symbols) & nzchar(symbols)
+        gene_symbols[valid] <- symbols[valid]
+    }
+    if (is.null(pseudotime_range)) pseudotime_range <- range(metadata$Pseudotime)
+    if (length(pseudotime_range) != 2L || any(!is.finite(pseudotime_range)) ||
+        diff(pseudotime_range) <= 0) stop("Provide a valid increasing pseudotime_range.")
+
+    expression_colors <- circlize::colorRamp2(
+        seq(-z_limit, z_limit, length.out = 5L), viridisLite::viridis(5L)
+    )
+    pseudotime_colors <- circlize::colorRamp2(
+        seq(pseudotime_range[1L], pseudotime_range[2L], length.out = 3L),
+        c("#DCEAF0", "#9994BE", "#762A83")
+    )
+    top_annotation <- ComplexHeatmap::HeatmapAnnotation(
+        CellType = cell_labels, Pseudotime = metadata$Pseudotime,
+        col = list(CellType = celltype_colours, Pseudotime = pseudotime_colors),
+        simple_anno_size = grid::unit(2.5, "mm"), gap = grid::unit(1, "mm"),
+        border = FALSE, annotation_name_gp = grid::gpar(fontsize = 10)
+    )
+    if (is.null(label_genes)) {
+        positions <- unique(round(seq(1, length(gene_order), length.out = min(15L, length(gene_order)))))
+        label_genes <- unique(c(gene_symbols[positions], highlight_genes))
+    }
+    label_positions <- which(gene_symbols %in% label_genes | gene_order %in% label_genes)
+    right_annotation <- NULL
+    if (length(label_positions)) {
+        highlighted <- gene_symbols[label_positions] %in% highlight_genes |
+            gene_order[label_positions] %in% highlight_genes
+        label_colors <- ifelse(highlighted, "#D73027", "black")
+        right_annotation <- ComplexHeatmap::rowAnnotation(
+            Genes = ComplexHeatmap::anno_mark(
+                at = label_positions, labels = gene_symbols[label_positions], side = "right",
+                labels_gp = grid::gpar(fontsize = gene_fontsize, fontface = "italic", col = label_colors),
+                link_gp = grid::gpar(col = "#999999", lwd = 0.5)
+            ), show_annotation_name = FALSE
+        )
+    }
+    heatmap <- ComplexHeatmap::Heatmap(
+        z_matrix, name = "Expression", col = expression_colors,
+        top_annotation = top_annotation, right_annotation = right_annotation,
+        cluster_rows = FALSE, cluster_columns = FALSE,
+        show_row_names = FALSE, show_column_names = FALSE,
+        rect_gp = grid::gpar(col = NA), border = FALSE,
+        column_title = title,
+        column_title_gp = grid::gpar(fontsize = 12, fontface = "bold"),
+        heatmap_legend_param = list(title = "Row z-score", at = c(-z_limit, 0, z_limit)),
+        height = grid::unit(heatmap_height_cm, "cm"),
+        width = grid::unit(heatmap_width_cm, "cm"),
+        use_raster = TRUE, raster_quality = 2
+    )
+    list(
+        heatmap = heatmap, z_matrix = z_matrix,
+        predicted_expression = predicted_expression, cell_metadata = metadata,
+        gene_order = gene_order, gene_symbols = gene_symbols,
+        failed_predictions = failed_predictions, constant_genes = constant_genes,
+        reference_sample = reference_sample
+    )
+}
+
+
 # =============================================================================
 # Data loading and import
 # =============================================================================
