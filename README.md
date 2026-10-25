@@ -36,7 +36,7 @@ only when needed:
   observations.
 - Seaborn for grouped expression and sample-level abundance violin plots.
 - statsmodels when Benjamini-Hochberg adjustment is requested for violin-plot
-  comparisons.
+  or donor-level expression comparisons.
 
 Install packages in the analysis environment appropriate for the study. This
 repository does not pin an environment or alter raw input data automatically.
@@ -47,16 +47,19 @@ When Python is started from the repository root:
 
 ```python
 from Python.scRNAseq_preprocessing import (
+    AGE_EXPRESSION_COLORS,
     AT2_AGE_GROUP_COLORS,
     MHCII_GROUP_COLORS,
     WT_CKO_COLORS,
     cluster_expression_summary,
     convert_genes_to_features,
+    get_scanpy_de_table,
     match_genes_to_adata,
     ordmag_filter,
     plot_adata_stacked_bar,
     plot_anndata_group_umap,
     plot_at2_age_cell_style,
+    plot_gene_expression_by_age,
     plot_seurat_violins,
     quick_umap,
     quick_umap_proj,
@@ -80,11 +83,13 @@ from Python.scRNAseq_preprocessing import (
 | Reference dimensionality reduction | `quick_umap()` | Fits a reusable umap-learn model to reference PCA coordinates and stores its embedding. | Fitted UMAP model; coordinates are also stored in the reference `AnnData`. |
 | Reference projection | `quick_umap_proj()` | Projects query PCA coordinates through a fitted reference UMAP model. | NumPy coordinate array. |
 | Exploratory marker analysis | `wilcoxon_am1_vs_am2()` | Runs bidirectional Scanpy Wilcoxon comparisons between two annotated AM groups. | Two-group `AnnData`, complete DE tables, and filtered marker tables. |
+| Differential-expression reporting | `get_scanpy_de_table()` | Adds group means, detection percentages, average expression, and direction to a stored Scanpy marker table. | Annotated and ordered pandas `DataFrame`. |
 | Figure layout | `trim_axs()` | Removes unused Matplotlib axes from a subplot grid. | Flattened array of retained axes. |
 | UMAP visualization | `plot_anndata_group_umap()` | Plots one or more categorical UMAP panels, including split and highlight modes. | Figure and axes array. |
 | Composition visualization | `plot_adata_stacked_bar()` | Calculates and plots cell-composition percentages from `adata.obs`. | Figure and axes; optionally the percentage table. |
 | Expression visualization | `plot_seurat_violins()` | Draws grouped gene-expression violins with optional points, boxes, and exploratory tests. | Statistics table, figure, and axes; optionally extracted expression data. |
 | Sample-level abundance visualization | `plot_at2_age_cell_style()` | Compares young and old sample-level AT2 percentages with violins, box plots, replicate points, and a Mann-Whitney test. | Plotting table, figure, axis, and test result. |
+| Donor-level expression visualization | `plot_gene_expression_by_age()` | Aggregates cells to donor means and compares two age groups without cell-level pseudoreplication. | Donor table, statistics table, figure, and axes. |
 
 ### Data loading and 10X preparation
 
@@ -275,6 +280,45 @@ the fitted UMAP model together with that PCA and preprocessing provenance.
 
 ### Exploratory two-group marker analysis
 
+#### `get_scanpy_de_table(...)`
+
+Converts a stored `scanpy.tl.rank_genes_groups()` result into an annotated
+table with mean log1p expression and percentage detected in two requested
+groups, average expression, detection-frequency difference, and effect
+direction.
+
+```python
+import scanpy as sc
+
+sc.tl.rank_genes_groups(
+    adata,
+    groupby="MHCII_group",
+    groups=["MHCIIhi"],
+    reference="MHCIIlo",
+    method="wilcoxon",
+    use_raw=True,
+    key_added="MHCIIhi_vs_MHCIIlo_explicit",
+)
+
+de_table = get_scanpy_de_table(
+    adata,
+    groupby="MHCII_group",
+    group1="MHCIIhi",
+    group2="MHCIIlo",
+    key="MHCIIhi_vs_MHCIIlo_explicit",
+    use_raw=True,
+    expression_threshold=0,
+)
+```
+
+The function does not rerun differential expression or modify the AnnData
+object. The selected expression source must contain finite normalized,
+log1p-transformed values with unique gene names. It validates the stored
+grouping, reference, raw-data setting, and layer against the requested
+contrast. Stored comparisons against `rest` are rejected because AnnData
+subsetting can preserve results that historically included additional groups;
+rerun Scanpy with an explicit `reference=group2` before using this helper.
+
 #### `wilcoxon_am1_vs_am2(...)`
 
 Subsets an AnnData object to two annotation groups, runs Scanpy's Wilcoxon
@@ -317,6 +361,34 @@ Use a donor-aware model or sample-level pseudobulk method for inference across
 replicated samples.
 
 ### Visualization
+
+#### `plot_gene_expression_by_age(...)`
+
+Aggregates selected expression values to one mean per biological donor before
+comparing two age groups. Donor/group combinations below the configured cell
+minimum are excluded, and donors appearing in both groups trigger an error
+because the implemented Mann-Whitney test is unpaired.
+
+```python
+donor_df, stats_df, fig, axes = plot_gene_expression_by_age(
+    adata,
+    genes=["PLAUR", "GDF15", "NR4A1"],
+    group_col="Age_group",
+    donor_col="Sample",
+    group_order=["Young", "Old"],
+    layer="log1p",
+    min_cells_per_donor=20,
+    colors=AGE_EXPRESSION_COLORS,
+    adjust_p=True,
+    save="outputs/age_expression.pdf",
+)
+```
+
+Tests with fewer than two retained donors in either group are reported as
+missing. Benjamini-Hochberg adjustment is applied across plotted genes when
+requested. Sparse cell-level matrices remain sparse during donor aggregation.
+This donor-level view avoids cell-level pseudoreplication but does not model
+batch, covariates, paired donors, or repeated measures.
 
 #### `plot_at2_age_cell_style(...)`
 
@@ -439,6 +511,7 @@ an appropriate mixed model.
 
 | Palette | Categories and colours | Intended use |
 |---|---|---|
+| `AGE_EXPRESSION_COLORS` | `Young: #78B7A3`, `Old: #C17C3B` | Donor-level Young-versus-Old gene-expression plots. |
 | `AT2_AGE_GROUP_COLORS` | `Young: #78B7A3`, `Old: #D98973` | Sample-level young-versus-old AT2 abundance plots. |
 | `MHCII_GROUP_COLORS` | `MHCIIhi: #E7B2B6`, `MHCIIlo: #B7C3E0` | High- and low-MHCII annotation groups. |
 | `WT_CKO_COLORS` | `WT: #898C8B`, `cKO: #9CB4CC` | Wild-type and conditional-knockout groups. |

@@ -27,16 +27,19 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "AGE_EXPRESSION_COLORS",
     "AT2_AGE_GROUP_COLORS",
     "MHCII_GROUP_COLORS",
     "WT_CKO_COLORS",
     "cluster_expression_summary",
     "convert_genes_to_features",
+    "get_scanpy_de_table",
     "match_genes_to_adata",
     "ordmag_filter",
     "plot_at2_age_cell_style",
     "plot_adata_stacked_bar",
     "plot_anndata_group_umap",
+    "plot_gene_expression_by_age",
     "plot_seurat_violins",
     "read_one_gsm",
     "quick_umap",
@@ -50,6 +53,13 @@ __all__ = [
 # =============================================================================
 # Reusable colour palettes
 # =============================================================================
+
+
+AGE_EXPRESSION_COLORS = {
+    "Young": "#78B7A3",
+    "Old": "#C17C3B",
+}
+"""Reusable colours for donor-level Young/Old expression comparisons."""
 
 
 AT2_AGE_GROUP_COLORS = {
@@ -1289,6 +1299,297 @@ def quick_umap_proj(adata_new: AnnData, umap_ref: Any) -> np.ndarray:
 # =============================================================================
 
 
+def get_scanpy_de_table(
+    adata: AnnData,
+    groupby: str,
+    group1: str,
+    group2: str,
+    key: str,
+    use_raw: bool = True,
+    layer: str | None = None,
+    expression_threshold: float = 0,
+) -> pd.DataFrame:
+    """Augment stored Scanpy differential-expression results with expression summaries.
+
+    The function extracts one group from a result stored by
+    :func:`scanpy.tl.rank_genes_groups`, calculates group-specific mean
+    expression and detection percentages from the selected expression source,
+    and returns a limma/edgeR-style annotated table. The selected expression
+    matrix is expected to contain normalized, log1p-transformed values.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing both the stored Scanpy result and the cells
+        used to calculate group-level expression summaries. It is not modified.
+    groupby : str
+        Column in ``adata.obs`` containing the group labels.
+    group1 : str
+        Focal group extracted from the stored Scanpy result. Positive
+        ``logfoldchanges`` values are labelled as higher in this group.
+    group2 : str
+        Comparison group used for the additional expression summaries.
+    key : str
+        Key under ``adata.uns`` supplied as ``key_added`` when
+        ``scanpy.tl.rank_genes_groups()`` was run.
+    use_raw : bool, default=True
+        Whether to calculate means and detection percentages from
+        ``adata.raw``. When ``False``, ``adata.X`` and ``adata.var_names`` are
+        used unless ``layer`` is supplied.
+    layer : str or None, default=None
+        Named normalized/log1p expression layer used when ``use_raw=False``.
+        It must match the layer recorded in the stored Scanpy result.
+    expression_threshold : float, default=0
+        Non-negative threshold above which a value is counted as detected.
+        Zero is generally appropriate for non-negative log1p expression.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Stored Scanpy statistics merged with focal/comparison mean log1p
+        expression, detection percentages, average mean expression,
+        percentage-point detection difference, and effect direction. Rows are
+        sorted by adjusted and nominal p-value when those columns are present.
+
+    Raises
+    ------
+    KeyError
+        If the grouping column, stored result key, or requested result group is
+        unavailable.
+    TypeError
+        If scalar parameters have incompatible types.
+    ValueError
+        If groups are identical or empty, the stored contrast cannot be
+        verified, the selected source is unavailable, variable names are
+        duplicated, expression values are non-finite, or
+        ``expression_threshold`` is negative or non-finite.
+
+    Examples
+    --------
+    >>> import scanpy as sc
+    >>> sc.tl.rank_genes_groups(
+    ...     adata,
+    ...     groupby="MHCII_group",
+    ...     groups=["MHCIIhi"],
+    ...     reference="MHCIIlo",
+    ...     method="wilcoxon",
+    ...     use_raw=True,
+    ...     key_added="MHCIIhi_vs_MHCIIlo_explicit",
+    ... )
+    >>> table = get_scanpy_de_table(
+    ...     adata,
+    ...     groupby="MHCII_group",
+    ...     group1="MHCIIhi",
+    ...     group2="MHCIIlo",
+    ...     key="MHCIIhi_vs_MHCIIlo_explicit",
+    ...     use_raw=True,
+    ... )
+
+    Notes
+    -----
+    This helper does not rerun differential expression. It validates the
+    stored grouping, reference, raw-data setting, and layer. Results calculated
+    against ``"rest"`` are rejected because AnnData subsetting can preserve a
+    result whose historical comparison included additional groups. Rerun
+    :func:`scanpy.tl.rank_genes_groups` with ``reference=group2`` before using
+    this helper. Means are arithmetic means on the selected log1p scale, not
+    back-transformed count means.
+    """
+    string_parameters = {
+        "groupby": groupby,
+        "group1": group1,
+        "group2": group2,
+        "key": key,
+    }
+    for parameter_name, parameter_value in string_parameters.items():
+        if not isinstance(parameter_value, str):
+            raise TypeError(f"{parameter_name} must be a string")
+        if not parameter_value.strip():
+            raise ValueError(f"{parameter_name} must be a non-empty string")
+    if group1 == group2:
+        raise ValueError("group1 and group2 must be different")
+    if not isinstance(use_raw, bool):
+        raise TypeError("use_raw must be a Boolean")
+    if layer is not None and not isinstance(layer, str):
+        raise TypeError("layer must be a string or None")
+    if layer == "":
+        raise ValueError("layer must be non-empty when supplied")
+    if use_raw and layer is not None:
+        raise ValueError("choose either use_raw=True or a layer, not both")
+    if isinstance(expression_threshold, bool):
+        raise TypeError("expression_threshold must be numeric")
+    try:
+        expression_threshold = float(expression_threshold)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("expression_threshold must be numeric") from exc
+    if not np.isfinite(expression_threshold) or expression_threshold < 0:
+        raise ValueError("expression_threshold must be finite and non-negative")
+
+    if groupby not in adata.obs.columns:
+        raise KeyError(f"column not found in adata.obs: {groupby}")
+    if key not in adata.uns:
+        raise KeyError(f"rank_genes_groups key not found in adata.uns: {key}")
+
+    group_values = adata.obs[groupby].astype("string")
+    mask1 = group_values.eq(str(group1)).fillna(False).to_numpy(dtype=bool)
+    mask2 = group_values.eq(str(group2)).fillna(False).to_numpy(dtype=bool)
+    if not mask1.any() or not mask2.any():
+        raise ValueError(
+            f"both groups must contain cells: {group1}={mask1.sum()}, "
+            f"{group2}={mask2.sum()}"
+        )
+
+    stored_result = adata.uns[key]
+    if not isinstance(stored_result, Mapping):
+        raise ValueError(f"adata.uns[{key!r}] is not a verifiable result mapping")
+    stored_parameters = stored_result.get("params")
+    if not isinstance(stored_parameters, Mapping):
+        raise ValueError(
+            f"adata.uns[{key!r}] does not contain verifiable rank_genes_groups params"
+        )
+    stored_groupby = stored_parameters.get("groupby")
+    stored_reference = stored_parameters.get("reference")
+    if stored_groupby != groupby:
+        raise ValueError(
+            f"stored result uses groupby={stored_groupby!r}, not {groupby!r}"
+        )
+    if stored_reference is None:
+        raise ValueError("stored result does not record its reference group")
+    if str(stored_reference) == "rest":
+        raise ValueError(
+            "stored reference='rest' cannot verify a historical two-group "
+            f"contrast; rerun rank_genes_groups with reference={group2!r}"
+        )
+    if str(stored_reference) != str(group2):
+        raise ValueError(
+            f"stored result uses reference={stored_reference!r}, not {group2!r}"
+        )
+
+    stored_use_raw = stored_parameters.get("use_raw")
+    if stored_use_raw is not None and bool(stored_use_raw) != use_raw:
+        raise ValueError(
+            "use_raw does not match the expression source recorded in the stored result"
+        )
+    stored_layer = stored_parameters.get("layer")
+    if stored_layer != layer:
+        raise ValueError(
+            f"layer={layer!r} does not match stored result layer={stored_layer!r}"
+        )
+
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("use_raw=True, but adata.raw is unavailable")
+        expression_matrix = adata.raw.X
+        genes = pd.Index(adata.raw.var_names).astype(str)
+    else:
+        if layer is not None:
+            if layer not in adata.layers:
+                raise KeyError(f"layer not found in adata.layers: {layer}")
+            expression_matrix = adata.layers[layer]
+        else:
+            expression_matrix = adata.X
+        genes = pd.Index(adata.var_names).astype(str)
+
+    if genes.has_duplicates:
+        raise ValueError("the selected expression source contains duplicate gene names")
+    if expression_matrix.shape != (adata.n_obs, len(genes)):
+        raise ValueError("the selected expression matrix is not aligned to adata observations")
+    if sparse.issparse(expression_matrix):
+        if not np.isfinite(expression_matrix.data).all():
+            raise ValueError("the selected expression matrix contains non-finite values")
+    elif not np.isfinite(np.asarray(expression_matrix)).all():
+        raise ValueError("the selected expression matrix contains non-finite values")
+
+    import scanpy as sc
+
+    try:
+        de = sc.get.rank_genes_groups_df(
+            adata,
+            group=group1,
+            key=key,
+        )
+    except KeyError as exc:
+        raise KeyError(
+            f"group {group1!r} is unavailable in rank_genes_groups result {key!r}"
+        ) from exc
+    de = de.rename(columns={"names": "gene"})
+    if "gene" not in de.columns or "logfoldchanges" not in de.columns:
+        raise ValueError(
+            "the stored Scanpy result must contain names and logfoldchanges"
+        )
+    de["gene"] = de["gene"].astype(str)
+
+    def _mean_by_mask(mask: np.ndarray) -> np.ndarray:
+        selected = expression_matrix[mask, :]
+        return np.asarray(selected.mean(axis=0)).ravel()
+
+    def _percentage_by_mask(mask: np.ndarray) -> np.ndarray:
+        selected = expression_matrix[mask, :]
+        if sparse.issparse(selected):
+            detected = selected > expression_threshold
+            return np.asarray(detected.mean(axis=0)).ravel() * 100
+        return np.mean(
+            np.asarray(selected) > expression_threshold,
+            axis=0,
+        ) * 100
+
+    print(f"{group1}: {mask1.sum()} cells")
+    print(f"{group2}: {mask2.sum()} cells")
+
+    mean1 = _mean_by_mask(mask1)
+    mean2 = _mean_by_mask(mask2)
+    pct1 = _percentage_by_mask(mask1)
+    pct2 = _percentage_by_mask(mask2)
+    mean1_column = f"mean_{group1}_log1p"
+    mean2_column = f"mean_{group2}_log1p"
+    pct1_column = f"pct_{group1}"
+    pct2_column = f"pct_{group2}"
+
+    expression_statistics = pd.DataFrame(
+        {
+            "gene": genes,
+            mean1_column: mean1,
+            mean2_column: mean2,
+            pct1_column: pct1,
+            pct2_column: pct2,
+        }
+    )
+    de = de.merge(expression_statistics, on="gene", how="left", validate="one_to_one")
+    de["AveExpr_log1p"] = (de[mean1_column] + de[mean2_column]) / 2
+    de["pct_diff"] = de[pct1_column] - de[pct2_column]
+    de["Direction"] = np.select(
+        [de["logfoldchanges"] > 0, de["logfoldchanges"] < 0],
+        [f"Higher in {group1}", f"Higher in {group2}"],
+        default="No difference",
+    )
+
+    preferred_columns = [
+        "gene",
+        "Direction",
+        "AveExpr_log1p",
+        mean1_column,
+        mean2_column,
+        pct1_column,
+        pct2_column,
+        "pct_diff",
+        "logfoldchanges",
+        "scores",
+        "pvals",
+        "pvals_adj",
+    ]
+    existing_columns = [
+        column for column in preferred_columns if column in de.columns
+    ]
+    other_columns = [column for column in de.columns if column not in existing_columns]
+    de = de[existing_columns + other_columns]
+
+    sort_columns = [column for column in ["pvals_adj", "pvals"] if column in de]
+    if sort_columns:
+        de = de.sort_values(sort_columns, ascending=True, na_position="last")
+
+    return de.reset_index(drop=True)
+
+
 def wilcoxon_am1_vs_am2(
     adata_AM: AnnData,
     group_col: str = "MHCII_group",
@@ -1542,6 +1843,473 @@ def wilcoxon_am1_vs_am2(
 # =============================================================================
 # Visualization utilities
 # =============================================================================
+
+
+def plot_gene_expression_by_age(
+    adata: AnnData,
+    genes: Iterable[str] = ("PLAUR", "GDF15", "NR4A1"),
+    group_col: str = "Age_group",
+    donor_col: str = "Sample",
+    group_order: Iterable[str] = ("Young", "Old"),
+    layer: str | None = None,
+    use_raw: bool = False,
+    min_cells_per_donor: int = 20,
+    colors: Mapping[str, str] | None = None,
+    figsize: tuple[float, float] | None = None,
+    show_points: bool = True,
+    point_size: float = 45,
+    test: str = "mannwhitney",
+    adjust_p: bool = True,
+    save: str | Path | None = None,
+    dpi: int = 300,
+    transparent: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, Figure, np.ndarray]:
+    """Plot donor-level mean gene expression across two age groups.
+
+    Cells are aggregated to one mean value per biological donor and age group
+    before statistical testing, so plotted points and test observations are
+    donors rather than cells. Donor/group combinations with fewer than
+    ``min_cells_per_donor`` cells are excluded.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing expression values and donor/group metadata.
+        The object is inspected but is not modified.
+    genes : iterable of str, default=("PLAUR", "GDF15", "NR4A1")
+        Unique genes to summarize and plot, in display order. All genes must be
+        present in the selected expression source.
+    group_col : str, default="Age_group"
+        ``adata.obs`` column containing the two age-group labels.
+    donor_col : str, default="Sample"
+        ``adata.obs`` column identifying independent biological donors.
+    group_order : iterable of str, default=("Young", "Old")
+        Exactly two distinct group labels, in plotting and contrast order.
+    layer : str or None, default=None
+        Expression layer used when ``use_raw=False``. ``None`` uses
+        ``adata.X``. A layer cannot be combined with ``use_raw=True``.
+    use_raw : bool, default=False
+        Whether to read expression from ``adata.raw``.
+    min_cells_per_donor : int, default=20
+        Minimum cells required for each retained donor/group combination.
+    colors : mapping of str to str or None, default=None
+        Colours for the two labels in ``group_order``. ``None`` uses
+        :data:`AGE_EXPRESSION_COLORS`. The supplied mapping is not modified.
+    figsize : tuple of float or None, default=None
+        Figure width and height in inches. ``None`` uses 3.4 inches per gene
+        and a height of 4 inches.
+    show_points : bool, default=True
+        Whether to overlay jittered donor-level observations.
+    point_size : float, default=45
+        Donor-point area in points squared.
+    test : str, default="mannwhitney"
+        Donor-level test. Currently only a two-sided Mann-Whitney U test is
+        supported.
+    adjust_p : bool, default=True
+        Whether to apply Benjamini-Hochberg adjustment across plotted genes.
+    save : str, pathlib.Path, or None, default=None
+        Optional output filename. Missing parent directories are created.
+    dpi : int, default=300
+        Raster resolution used when saving the figure.
+    transparent : bool, default=True
+        Whether a saved figure should have a transparent background.
+
+    Returns
+    -------
+    donor_df : pandas.DataFrame
+        One row per retained donor/group combination, containing mean
+        expression for every requested gene and the contributing cell count.
+    stats_df : pandas.DataFrame
+        Per-gene donor counts, Mann-Whitney statistic, nominal p-value,
+        adjusted p-value, and significance label. Tests with fewer than two
+        donors in either group are returned as missing.
+    fig : matplotlib.figure.Figure
+        Completed multi-panel figure.
+    axes : numpy.ndarray
+        One-dimensional array of axes in gene display order.
+
+    Raises
+    ------
+    KeyError
+        If metadata, expression layers, or requested genes are absent.
+    TypeError
+        If Boolean or integer controls have incompatible types.
+    ValueError
+        If groups, donor assignments, matrices, palettes, dimensions, or
+        plotting parameters are invalid, or no donor passes the cell filter.
+
+    Examples
+    --------
+    >>> donor_df, stats_df, fig, axes = plot_gene_expression_by_age(
+    ...     adata,
+    ...     genes=["PLAUR", "GDF15", "NR4A1"],
+    ...     group_col="Age_group",
+    ...     donor_col="Sample",
+    ...     group_order=["Young", "Old"],
+    ...     layer="log1p",
+    ...     save="outputs/age_expression.pdf",
+    ... )
+
+    Notes
+    -----
+    The selected expression source should be normalized and preferably
+    log-transformed. Sparse cell-level matrices remain sparse during donor
+    aggregation; only the resulting donor mean vectors are materialized. The
+    unpaired Mann-Whitney test does not model covariates, batch, repeated
+    measures, or paired donors.
+    """
+    if isinstance(genes, (str, bytes)):
+        raise TypeError("genes must be an iterable of gene names, not a string")
+    selected_genes = [str(gene).strip() for gene in genes]
+    if not selected_genes or any(not gene for gene in selected_genes):
+        raise ValueError("genes must contain non-empty gene names")
+    if len(set(selected_genes)) != len(selected_genes):
+        raise ValueError("genes must not contain duplicates")
+
+    string_parameters = {"group_col": group_col, "donor_col": donor_col}
+    for parameter_name, parameter_value in string_parameters.items():
+        if not isinstance(parameter_value, str):
+            raise TypeError(f"{parameter_name} must be a string")
+        if not parameter_value.strip():
+            raise ValueError(f"{parameter_name} must be a non-empty string")
+
+    if isinstance(group_order, (str, bytes)):
+        raise TypeError("group_order must contain two labels, not a string")
+    ordered_groups = [str(group).strip() for group in group_order]
+    if len(ordered_groups) != 2 or any(not group for group in ordered_groups):
+        raise ValueError("group_order must contain exactly two non-empty labels")
+    if ordered_groups[0] == ordered_groups[1]:
+        raise ValueError("group_order labels must be different")
+
+    if not isinstance(use_raw, bool):
+        raise TypeError("use_raw must be a Boolean")
+    if layer is not None and not isinstance(layer, str):
+        raise TypeError("layer must be a string or None")
+    if layer == "":
+        raise ValueError("layer must be non-empty when supplied")
+    if use_raw and layer is not None:
+        raise ValueError("choose either use_raw=True or a layer, not both")
+    if not isinstance(min_cells_per_donor, Integral) or isinstance(
+        min_cells_per_donor, bool
+    ):
+        raise TypeError("min_cells_per_donor must be an integer")
+    if min_cells_per_donor < 1:
+        raise ValueError("min_cells_per_donor must be positive")
+    if not isinstance(show_points, bool) or not isinstance(adjust_p, bool):
+        raise TypeError("show_points and adjust_p must be Booleans")
+    if not isinstance(transparent, bool):
+        raise TypeError("transparent must be a Boolean")
+    if not np.isfinite(point_size) or point_size <= 0:
+        raise ValueError("point_size must be positive and finite")
+    if not isinstance(dpi, Integral) or isinstance(dpi, bool):
+        raise TypeError("dpi must be an integer")
+    if dpi < 1:
+        raise ValueError("dpi must be positive")
+    if test != "mannwhitney":
+        raise ValueError("test must be 'mannwhitney'")
+
+    if figsize is None:
+        figsize = (3.4 * len(selected_genes), 4.0)
+    elif len(figsize) != 2 or any(
+        not np.isfinite(value) or value <= 0 for value in figsize
+    ):
+        raise ValueError("figsize must contain two positive finite values")
+
+    missing_metadata = [
+        column for column in [group_col, donor_col] if column not in adata.obs
+    ]
+    if missing_metadata:
+        raise KeyError("missing adata.obs columns: " + ", ".join(missing_metadata))
+
+    metadata = adata.obs[[group_col, donor_col]].copy()
+    if metadata.isna().any().any():
+        raise ValueError("group and donor metadata must not contain missing values")
+    metadata[group_col] = metadata[group_col].astype(str).str.strip()
+    metadata[donor_col] = metadata[donor_col].astype(str).str.strip()
+    if (metadata[[group_col, donor_col]] == "").any().any():
+        raise ValueError("group and donor metadata must not contain blank values")
+
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("use_raw=True, but adata.raw is unavailable")
+        available_genes = pd.Index(adata.raw.var_names).astype(str)
+        if available_genes.has_duplicates:
+            raise ValueError("adata.raw contains duplicate gene names")
+        missing_genes = [
+            gene for gene in selected_genes if gene not in available_genes
+        ]
+        if missing_genes:
+            raise KeyError("genes absent from adata.raw: " + ", ".join(missing_genes))
+        expression_matrix = adata.raw[:, selected_genes].X
+    else:
+        available_genes = pd.Index(adata.var_names).astype(str)
+        if available_genes.has_duplicates:
+            raise ValueError("adata.var_names contains duplicate gene names")
+        missing_genes = [
+            gene for gene in selected_genes if gene not in available_genes
+        ]
+        if missing_genes:
+            raise KeyError(
+                "genes absent from adata.var_names: " + ", ".join(missing_genes)
+            )
+        if layer is None:
+            expression_matrix = adata[:, selected_genes].X
+        else:
+            if layer not in adata.layers:
+                raise KeyError(f"layer not found in adata.layers: {layer}")
+            expression_matrix = adata[:, selected_genes].layers[layer]
+
+    if expression_matrix.shape != (adata.n_obs, len(selected_genes)):
+        raise ValueError("selected expression values are not aligned to adata")
+    if sparse.issparse(expression_matrix):
+        if not np.isfinite(expression_matrix.data).all():
+            raise ValueError("selected expression values must be finite")
+    else:
+        expression_matrix = np.asarray(expression_matrix)
+        if not np.isfinite(expression_matrix).all():
+            raise ValueError("selected expression values must be finite")
+
+    comparison_mask = metadata[group_col].isin(ordered_groups).to_numpy()
+    if not comparison_mask.any():
+        raise ValueError("no cells belong to the requested groups")
+    comparison_metadata = metadata.loc[comparison_mask].copy()
+
+    sample_counts = (
+        comparison_metadata.groupby([donor_col, group_col], observed=True)
+        .size()
+        .rename("n_cells")
+        .reset_index()
+    )
+    valid_sample_counts = sample_counts.loc[
+        sample_counts["n_cells"] >= min_cells_per_donor
+    ].copy()
+    if valid_sample_counts.empty:
+        raise ValueError("no donor/group combination meets min_cells_per_donor")
+
+    donor_group_counts = valid_sample_counts.groupby(donor_col)[group_col].nunique()
+    repeated_donors = donor_group_counts[donor_group_counts > 1].index.tolist()
+    if repeated_donors:
+        raise ValueError(
+            "donors occur in both groups but the requested test is unpaired: "
+            + ", ".join(map(str, repeated_donors))
+        )
+
+    donor_counts = valid_sample_counts.groupby(group_col, observed=True)[
+        donor_col
+    ].nunique()
+    missing_donor_groups = [
+        group for group in ordered_groups if donor_counts.get(group, 0) == 0
+    ]
+    if missing_donor_groups:
+        raise ValueError(
+            "no retained donors for groups: " + ", ".join(missing_donor_groups)
+        )
+
+    metadata_groups = metadata[group_col].to_numpy()
+    metadata_donors = metadata[donor_col].to_numpy()
+    donor_records: list[dict[str, Any]] = []
+    for _, sample_record in valid_sample_counts.iterrows():
+        pair_mask = (
+            (metadata_donors == sample_record[donor_col])
+            & (metadata_groups == sample_record[group_col])
+        )
+        pair_matrix = expression_matrix[pair_mask, :]
+        mean_expression = np.asarray(pair_matrix.mean(axis=0)).ravel()
+        donor_record: dict[str, Any] = {
+            donor_col: sample_record[donor_col],
+            group_col: sample_record[group_col],
+            "n_cells": int(sample_record["n_cells"]),
+        }
+        donor_record.update(zip(selected_genes, mean_expression))
+        donor_records.append(donor_record)
+
+    donor_df = pd.DataFrame(donor_records)
+
+    plot_df = donor_df.melt(
+        id_vars=[donor_col, group_col, "n_cells"],
+        value_vars=selected_genes,
+        var_name="Gene",
+        value_name="Mean_expression",
+    )
+
+    from scipy.stats import mannwhitneyu
+
+    statistics: list[dict[str, Any]] = []
+    for gene in selected_genes:
+        gene_data = plot_df.loc[plot_df["Gene"] == gene]
+        first_group = gene_data.loc[
+            gene_data[group_col] == ordered_groups[0], "Mean_expression"
+        ].dropna()
+        second_group = gene_data.loc[
+            gene_data[group_col] == ordered_groups[1], "Mean_expression"
+        ].dropna()
+        if len(first_group) >= 2 and len(second_group) >= 2:
+            statistic, p_value = mannwhitneyu(
+                first_group,
+                second_group,
+                alternative="two-sided",
+            )
+        else:
+            statistic, p_value = np.nan, np.nan
+        statistics.append(
+            {
+                "Gene": gene,
+                f"n_{ordered_groups[0]}": len(first_group),
+                f"n_{ordered_groups[1]}": len(second_group),
+                "statistic": statistic,
+                "p_value": p_value,
+            }
+        )
+
+    stats_df = pd.DataFrame(statistics)
+    stats_df["p_adjusted"] = stats_df["p_value"]
+    valid_pvalues = stats_df["p_value"].notna()
+    if adjust_p and valid_pvalues.any():
+        from statsmodels.stats.multitest import multipletests
+
+        stats_df.loc[valid_pvalues, "p_adjusted"] = multipletests(
+            stats_df.loc[valid_pvalues, "p_value"],
+            method="fdr_bh",
+        )[1]
+
+    def _pvalue_label(pvalue: float) -> str:
+        if pd.isna(pvalue):
+            return "NA"
+        if pvalue < 0.0001:
+            return "****"
+        if pvalue < 0.001:
+            return "***"
+        if pvalue < 0.01:
+            return "**"
+        if pvalue < 0.05:
+            return "*"
+        return "ns"
+
+    stats_df["significance"] = stats_df["p_adjusted"].map(_pvalue_label)
+    resolved_colors = dict(AGE_EXPRESSION_COLORS if colors is None else colors)
+    missing_colors = set(ordered_groups) - set(resolved_colors)
+    if missing_colors:
+        raise KeyError("colors is missing groups: " + ", ".join(sorted(missing_colors)))
+
+    import seaborn as sns
+
+    fig, axes_grid = plt.subplots(
+        1,
+        len(selected_genes),
+        figsize=figsize,
+        squeeze=False,
+    )
+    axes = axes_grid.ravel()
+    for ax, gene in zip(axes, selected_genes):
+        gene_data = plot_df.loc[plot_df["Gene"] == gene].copy()
+        sns.violinplot(
+            data=gene_data,
+            x=group_col,
+            y="Mean_expression",
+            order=ordered_groups,
+            palette=resolved_colors,
+            inner=None,
+            cut=0,
+            linewidth=1,
+            saturation=0.9,
+            ax=ax,
+        )
+        sns.boxplot(
+            data=gene_data,
+            x=group_col,
+            y="Mean_expression",
+            order=ordered_groups,
+            width=0.22,
+            showfliers=False,
+            boxprops={"facecolor": "white", "edgecolor": "black", "linewidth": 1},
+            whiskerprops={"color": "black", "linewidth": 1},
+            capprops={"color": "black", "linewidth": 1},
+            medianprops={"color": "black", "linewidth": 1.4},
+            ax=ax,
+        )
+        if show_points:
+            sns.stripplot(
+                data=gene_data,
+                x=group_col,
+                y="Mean_expression",
+                order=ordered_groups,
+                palette=resolved_colors,
+                size=np.sqrt(point_size),
+                jitter=0.12,
+                edgecolor="black",
+                linewidth=0.5,
+                alpha=0.9,
+                ax=ax,
+                zorder=3,
+            )
+
+        result = stats_df.loc[stats_df["Gene"] == gene].iloc[0]
+        adjusted_pvalue = result["p_adjusted"]
+        significance = result["significance"]
+        y_min, y_max = ax.get_ylim()
+        y_range = y_max - y_min
+        if not np.isfinite(y_range) or y_range <= 0:
+            y_range = 1.0
+        bracket_y = y_max + 0.06 * y_range
+        tick_height = 0.025 * y_range
+        ax.plot(
+            [0, 0, 1, 1],
+            [
+                bracket_y - tick_height,
+                bracket_y,
+                bracket_y,
+                bracket_y - tick_height,
+            ],
+            color="black",
+            linewidth=1,
+        )
+        if pd.isna(adjusted_pvalue):
+            p_text = "NA"
+        elif adjusted_pvalue < 0.001:
+            p_label = "FDR" if adjust_p else "P"
+            p_text = f"{significance}\n{p_label} = {adjusted_pvalue:.1e}"
+        else:
+            p_label = "FDR" if adjust_p else "P"
+            p_text = f"{significance}\n{p_label} = {adjusted_pvalue:.3f}"
+        ax.text(
+            0.5,
+            bracket_y + 0.015 * y_range,
+            p_text,
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
+        ax.set_ylim(y_min, y_max + 0.22 * y_range)
+        ax.set_title(
+            gene,
+            fontsize=14,
+            fontweight="bold",
+            fontstyle="italic",
+            pad=10,
+        )
+        ax.set_xlabel("")
+        ax.set_ylabel("Mean expression per sample", fontsize=11, fontweight="bold")
+        ax.tick_params(axis="x", labelsize=11, length=0)
+        ax.tick_params(axis="y", labelsize=10)
+        ax.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_linewidth(1)
+        ax.spines["bottom"].set_linewidth(1)
+
+    fig.tight_layout()
+    if save is not None:
+        output_path = Path(save)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            output_path,
+            dpi=int(dpi),
+            bbox_inches="tight",
+            transparent=transparent,
+            facecolor="none" if transparent else "white",
+        )
+
+    return donor_df, stats_df, fig, axes
 
 
 def trim_axs(axs: Any, N: int) -> np.ndarray:

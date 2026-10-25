@@ -19,6 +19,15 @@ preprocessing pipelines. All project files are maintained under
 
 ### Added
 
+- Added Python `get_scanpy_de_table()` to combine stored Scanpy differential-
+  expression statistics with group means, detection percentages, average
+  log1p expression, and direction labels; the helper validates stored grouping
+  and expression-source settings and requires an explicit reference group.
+- Added Python `plot_gene_expression_by_age()` for donor-level two-group gene-
+  expression summaries, minimum-cell filtering, Mann-Whitney testing, optional
+  FDR adjustment, sparse-safe donor aggregation, and reusable figure export.
+- Added `AGE_EXPRESSION_COLORS` to preserve the separately supplied Young/Old
+  donor-expression palette without overwriting the AT2-abundance palette.
 - Added Python `match_genes_to_adata()` for ordered exact and
   case-insensitive marker matching against AnnData variable names.
 - Added Python `plot_at2_age_cell_style()` for sample-level young-versus-old
